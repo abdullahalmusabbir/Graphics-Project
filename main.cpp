@@ -73,64 +73,58 @@ struct Perk   { float x, y, dy, r, g, b; PerkType type; bool active; };
 struct Bullet { float x, y; bool active; };
 struct HighScoreEntry { int score, level; float time; };
 
-// ==================== SOUND ====================
-// We use Windows MCI / PlaySound for nicer tones.
-// Each sound is a tiny inline WAV generated at runtime stored to a temp file,
-// OR we fall back to Beep() which is always available on Windows.
-// For simplicity and reliability we use Beep() sequences in a background
-// thread so the game never blocks.
 
 bool soundEnabled = true;
 
 #ifdef _WIN32
 DWORD WINAPI beepThread(LPVOID param) {
-    // param encodes what to play
+
     int id = (int)(intptr_t)param;
     switch (id) {
-        case 0: // brick hit
+        case 0:
             Beep(880, 25);
             break;
-        case 1: // paddle hit
+        case 1:
             Beep(440, 35);
             Beep(550, 25);
             break;
-        case 2: // perk collect
+        case 2:
             Beep(1047, 50);
             Beep(1319, 50);
             Beep(1568, 60);
             break;
-        case 3: // death / life lost
+        case 3:
             Beep(350, 120);
             Beep(280, 120);
             Beep(220, 180);
             break;
-        case 4: // game over
+        case 4:
             Beep(392, 120);
             Beep(330, 120);
             Beep(294, 120);
             Beep(220, 250);
             break;
-        case 5: // win / level clear
+        case 5:
             Beep(523,  80);
             Beep(659,  80);
             Beep(784,  80);
             Beep(1047, 80);
             Beep(1319, 160);
             break;
-        case 6: // bullet fire
+        case 6:
             Beep(1200, 18);
             break;
-        case 7: // level up fanfare
+        case 7:
             Beep(784,  80);
             Beep(988,  80);
             Beep(1175, 80);
             Beep(1568, 160);
             break;
-        case 8: // ball launch
+        case 8:
             Beep(660, 40);
             Beep(880, 40);
             break;
-        case 9: // fireball on
+        case 9:
             Beep(800, 30);
             Beep(1000,30);
             Beep(1200,40);
@@ -148,7 +142,6 @@ void playSound(int id) {
 void playSound(int /*id*/) {}
 #endif
 
-// Sound IDs
 #define SND_BRICK    0
 #define SND_PADDLE   1
 #define SND_PERK     2
@@ -160,7 +153,6 @@ void playSound(int /*id*/) {}
 #define SND_LAUNCH   8
 #define SND_FIREBALL 9
 
-// ==================== GLOBAL STATE ====================
 GameState gameState     = MENU;
 Ball      ball;
 Paddle    paddle;
@@ -186,9 +178,8 @@ bool  fireballActive = false; float fireballTimer = 0.0f;
 int   currentLevel   = 1;
 float flashTimer     = 0.0f;
 float flashR = 1, flashG = 1, flashB = 1;
-bool  gameStarted    = false;   // true while a game is in progress
+bool  gameStarted    = false;
 
-// ==================== HIGH SCORE ====================
 const std::string HS_FILE = "dx_highscores.dat";
 
 void loadHighScores() {
@@ -232,7 +223,6 @@ void addHighScore(int sc, float tm, int lv) {
     saveHighScores();
 }
 
-// ==================== UTILITY ====================
 std::string iStr(int v)               { std::ostringstream o; o<<v; return o.str(); }
 std::string fStr(float v,int d=1)     { std::ostringstream o; o.precision(d); o<<std::fixed<<v; return o.str(); }
 
@@ -261,7 +251,6 @@ void drawCircle(float cx,float cy,float rad,float r,float g,float b,bool fill=tr
     glEnd();
 }
 
-// ==================== BRESENHAM LINE ====================
 void draw_px(int x,int y){ glBegin(GL_POINTS); glVertex2i(x,y); glEnd(); }
 
 void bLine(int x1,int y1,int x2,int y2){
@@ -288,7 +277,7 @@ void bRectOut(float fx,float fy,float fw,float fh,float r,float g,float b){
     bLine(x2,y2,x1,y2); bLine(x1,y2,x1,y1);
 }
 
-// ==================== MIDPOINT CIRCLE ====================
+
 int g_cx,g_cy;
 void mcFill(int cx,int cy,int r){
     g_cx=cx; g_cy=cy;
@@ -304,7 +293,6 @@ void mcFill(int cx,int cy,int r){
     }
 }
 
-// ==================== GAME INIT ====================
 PerkType randomPerk(){
     int r=rand()%10;
     if(r==0) return PERK_EXTRA_LIFE;
@@ -354,7 +342,6 @@ void initBricks(){
     }
 }
 
-// Reset paddle to center, fixed Y, default width
 void resetPaddle(){
     paddle.width = paddleWidth;
     paddle.x     = WINDOW_WIDTH/2.0f - paddle.width/2.0f;
@@ -362,7 +349,6 @@ void resetPaddle(){
 }
 
 void initBall(){
-    // Place ball on paddle center
     ball.x = paddle.x + paddle.width/2.0f;
     ball.y = PADDLE_Y + PADDLE_HEIGHT + BALL_RADIUS + 1.0f;
     ball.speed = BALL_SPEED_INITIAL + (currentLevel-1)*0.5f;
@@ -408,7 +394,6 @@ void nextLevel(){
     gameState=PLAYING;
 }
 
-// ==================== PERKS ====================
 void spawnPerk(float x,float y,PerkType type){
     if(type==PERK_NONE) return;
     Perk p; p.x=x; p.y=y; p.dy=-PERK_SPEED; p.type=type; p.active=true;
@@ -475,7 +460,6 @@ void applyPerk(PerkType type){
     }
 }
 
-// ==================== COLLISION ====================
 bool ballBrickCollide(Brick& bk,bool pierce){
     if(!bk.active) return false;
     float bl=ball.x-BALL_RADIUS,br=ball.x+BALL_RADIUS;
@@ -499,16 +483,13 @@ bool bulletBrickCollide(Bullet& blt,Brick& bk){
     return true;
 }
 
-// ==================== UPDATE ====================
 void updateGame(float dt){
     if(gameState!=PLAYING) return;
     gameTime+=dt;
     if(flashTimer>0) flashTimer-=dt;
 
-    // Gradually increase speed
     ball.speed+=BALL_SPEED_INCREMENT;
 
-    // Perk timers
     if(fireballActive){
         fireballTimer-=dt; ball.fireTimer-=dt;
         if(fireballTimer<=0){fireballActive=false;ball.isFireball=false;ball.fireTimer=0;}
@@ -532,7 +513,6 @@ void updateGame(float dt){
         if(shootTimer<=0){shootActive=false;bullets.clear();}
     }
 
-    // Paddle keyboard movement
     if(keyLeft) {
         paddle.x-=PADDLE_SPEED;
         if(paddle.x<0) paddle.x=0;
@@ -542,40 +522,35 @@ void updateGame(float dt){
         if(paddle.x+paddle.width>WINDOW_WIDTH) paddle.x=WINDOW_WIDTH-paddle.width;
     }
 
-    // Ball sits on paddle until launched
     if(ballOnPaddle){
         ball.x=paddle.x+paddle.width/2.0f;
         ball.y=PADDLE_Y+PADDLE_HEIGHT+BALL_RADIUS+1.0f;
         return;
     }
 
-    // Normalise ball direction to current speed
     float mag=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
     if(mag>0){ball.dx=ball.dx/mag*ball.speed; ball.dy=ball.dy/mag*ball.speed;}
 
     ball.x+=ball.dx; ball.y+=ball.dy;
 
-    // Wall bounce
     if(ball.x-BALL_RADIUS<0)            {ball.x=BALL_RADIUS;      ball.dx= fabsf(ball.dx);}
     if(ball.x+BALL_RADIUS>WINDOW_WIDTH) {ball.x=WINDOW_WIDTH-BALL_RADIUS; ball.dx=-fabsf(ball.dx);}
     if(ball.y+BALL_RADIUS>WINDOW_HEIGHT){ball.y=WINDOW_HEIGHT-BALL_RADIUS;ball.dy=-fabsf(ball.dy);}
 
-    // Paddle collision
     if(ball.dy<0 &&
        ball.y-BALL_RADIUS<=PADDLE_Y+PADDLE_HEIGHT &&
        ball.y-BALL_RADIUS>=PADDLE_Y-4 &&
        ball.x>=paddle.x && ball.x<=paddle.x+paddle.width){
         playSound(SND_PADDLE);
         ball.dy=fabsf(ball.dy);
-        float hit=(ball.x-paddle.x)/paddle.width;   // 0..1
-        float ang=(hit-0.5f)*2.0f;                   // -1..+1
+        float hit=(ball.x-paddle.x)/paddle.width;
+        float ang=(hit-0.5f)*2.0f;
         ball.dx=ball.speed*ang*0.85f;
         float nm=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
         if(nm>0){ball.dx=ball.dx/nm*ball.speed; ball.dy=ball.dy/nm*ball.speed;}
         if(fabsf(ball.dy)<0.8f) ball.dy=(ball.dy<0)?-0.8f:0.8f;
     }
 
-    // Ball lost
     if(ball.y-BALL_RADIUS<0){
         playSound(SND_DEATH);
         lives--;
@@ -588,7 +563,6 @@ void updateGame(float dt){
         return;
     }
 
-    // Brick collision
     bool pierce=ball.isFireball;
     for(auto& bk:bricks){
         if(!bk.active) continue;
@@ -604,7 +578,6 @@ void updateGame(float dt){
         }
     }
 
-    // Check win
     int alive=0; for(auto&bk:bricks) if(bk.active) alive++;
     if(alive==0){
         score+=100*currentLevel;
@@ -617,7 +590,6 @@ void updateGame(float dt){
         return;
     }
 
-    // Perks fall
     for(auto&p:perks){
         if(!p.active) continue;
         p.y+=p.dy;
@@ -628,7 +600,6 @@ void updateGame(float dt){
         if(p.y<-PERK_HEIGHT) p.active=false;
     }
 
-    // Bullets
     for(auto&blt:bullets){
         if(!blt.active) continue;
         blt.y+=BULLET_SPEED;
@@ -647,7 +618,6 @@ void updateGame(float dt){
     }
 }
 
-// ==================== DRAW ====================
 void drawBackground(){
     glBegin(GL_QUADS);
     glColor3f(0,.0f,.15f); glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
@@ -663,7 +633,6 @@ void drawPaddle(){
     if(widerPaddleActive)  {pr=0;pg=.8f;pb=1;}
     glPointSize(1);
     bRect(px,py,pw,ph,pr,pg,pb);
-    // highlight strip
     float hr=std::min(pr+.4f,1.f),hg=std::min(pg+.3f,1.f);
     bRect(px+2,py+ph-4,pw-4,3,hr,hg,1);
     bRectOut(px,py,pw,ph,1,1,1);
@@ -754,7 +723,6 @@ void drawHUD(){
     drawText(510,WINDOW_HEIGHT-25,"Spd: "+fStr(ball.speed,1),1,.5f,0);
     drawText(630,WINDOW_HEIGHT-25,"Lvl: "+iStr(currentLevel)+"/"+iStr(MAX_LEVELS),.8f,.8f,1);
 
-    // Sound indicator top-right
     std::string st=soundEnabled?"SND:ON":"SND:OFF";
     drawText(740,WINDOW_HEIGHT-25,st,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
 
@@ -767,7 +735,6 @@ void drawHUD(){
              .5f,.5f,.5f,GLUT_BITMAP_HELVETICA_12);
 }
 
-// ==================== PAUSE OVERLAY ====================
 void drawPauseOverlay(){
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glColor4f(0,0,0,.65f);
@@ -799,10 +766,8 @@ void drawPauseOverlay(){
     drawText(265,192,"UP/DOWN: select   ENTER: confirm",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
-// ==================== MAIN MENU ====================
 void drawMenu(){
     drawBackground();
-    // decorative stars
     srand(42);
     for(int i=0;i<80;i++){
         float sx=(float)(rand()%WINDOW_WIDTH),sy=(float)(rand()%WINDOW_HEIGHT);
@@ -816,7 +781,6 @@ void drawMenu(){
     drawRect(100,512,600,2,0,.6f,1);
     drawText(278,494,"CSE 426 - Computer Graphics Lab",.7f,.7f,.7f,GLUT_BITMAP_HELVETICA_12);
 
-    // Build menu items dynamically
     std::vector<std::string> items;
     if(gameStarted){
         items={"RESUME GAME","NEW GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
@@ -824,7 +788,6 @@ void drawMenu(){
         items={"START GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
     }
     int n=(int)items.size();
-    // Clamp selection
     if(selectedMenu>=n) selectedMenu=n-1;
 
     for(int i=0;i<n;i++){
@@ -847,14 +810,12 @@ void drawMenu(){
     drawText(215,48,"UP/DOWN: navigate     ENTER: select",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
-// ==================== HIGH SCORE SCREEN ====================
 void drawHighScoreScreen(){
     drawBackground();
     drawTextL(298,548,"HIGH SCORES",0,.3f,.6f);
     drawTextL(295,550,"HIGH SCORES",0,.8f,1);
     drawRect(100,535,600,2,0,.6f,1);
 
-    // Header row
     drawRect(150,492,500,30,0,.1f,.3f);
     drawRect(150,492,500,30,0,.5f,.8f,false);
     drawText(178,503,"RANK", 0,.8f,1,GLUT_BITMAP_HELVETICA_12);
@@ -887,7 +848,6 @@ void drawHighScoreScreen(){
     drawText(248,160,"Press ESC to return to Menu",.6f,.8f,1,GLUT_BITMAP_HELVETICA_12);
 }
 
-// ==================== HELP SCREEN ====================
 void drawHelpScreen(){
     drawBackground();
     drawTextL(268,548,"HOW TO PLAY",0,.8f,1);
@@ -925,7 +885,6 @@ void drawHelpScreen(){
     drawText(238,37,"Press ESC to return to Menu",.5f,.7f,1,GLUT_BITMAP_HELVETICA_12);
 }
 
-// ==================== GAME OVER ====================
 void drawGameOver(){
     drawBackground(); drawBricks(); drawHUD();
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
@@ -942,7 +901,6 @@ void drawGameOver(){
     drawText(235,322,"Level Reached: "+iStr(currentLevel),.8f,.8f,1);
     drawText(235,294,"Time Played:   "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
 
-    // New high score?
     if(!highScores.empty()&&highScores[0].score==score)
         drawText(268,264,"*** NEW HIGH SCORE! ***",1,.84f,0);
 
@@ -950,7 +908,6 @@ void drawGameOver(){
     drawText(245,208,"Press ESC  for Main Menu",.7f,.7f,.7f);
 }
 
-// ==================== WIN ====================
 void drawWin(){
     drawBackground();
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
@@ -981,7 +938,7 @@ void drawWin(){
     drawText(238,214,"Press ESC  for Main Menu",.7f,.7f,.7f);
 }
 
-// ==================== FLASH ====================
+
 void drawFlash(){
     if(flashTimer<=0) return;
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
@@ -993,7 +950,6 @@ void drawFlash(){
     glEnd(); glDisable(GL_BLEND);
 }
 
-// ==================== DISPLAY ====================
 void display(){
     glClear(GL_COLOR_BUFFER_BIT);
     glLoadIdentity();
@@ -1034,7 +990,6 @@ void timerCB(int){
     glutTimerFunc(16,timerCB,0);
 }
 
-// ==================== INPUT ====================
 void fireBullet(){
     if(!shootActive||bulletCooldown>0) return;
     Bullet b1; b1.x=paddle.x+5;              b1.y=paddle.y+PADDLE_HEIGHT+1; b1.active=true;
@@ -1051,20 +1006,16 @@ void launchBall(){
     playSound(SND_LAUNCH);
 }
 
-// Return number of items in current menu
 int menuItemCount(){ return gameStarted?5:4; }
 
-// Map selectedMenu index to action when gameStarted==true
 void menuAction(int idx){
     if(gameStarted){
-        // RESUME, NEW GAME, HIGH SCORES, HOW TO PLAY, EXIT
         if(idx==0){ gameState=PLAYING; }
         else if(idx==1){ gameStarted=false; initGame(); }
         else if(idx==2){ gameState=HIGH_SCORE; }
         else if(idx==3){ gameState=HELP; }
         else if(idx==4){ exit(0); }
     }else{
-        // START GAME, HIGH SCORES, HOW TO PLAY, EXIT
         if(idx==0){ initGame(); }
         else if(idx==1){ gameState=HIGH_SCORE; }
         else if(idx==2){ gameState=HELP; }
@@ -1073,7 +1024,6 @@ void menuAction(int idx){
 }
 
 void keyboard(unsigned char key,int,int){
-    // M = toggle sound anywhere
     if(key=='m'||key=='M'){
         soundEnabled=!soundEnabled;
         if(soundEnabled) playSound(SND_PERK);
@@ -1153,8 +1103,6 @@ void specialKeysUp(int key,int,int){
 }
 
 void mouseMotion(int x,int){
-    // Only move paddle via mouse when playing AND ball is NOT on paddle
-    // (prevents the "paddle drift at launch" bug)
     if(gameState!=PLAYING) return;
     float nx=(float)x-paddle.width/2.0f;
     if(nx<0) nx=0;
@@ -1169,7 +1117,6 @@ void mouseClick(int btn,int state,int x,int){
     }
 }
 
-// ==================== MAIN ====================
 int main(int argc,char**argv){
     srand((unsigned)time(0));
     loadHighScores();
