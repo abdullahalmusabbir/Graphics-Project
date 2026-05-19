@@ -15,7 +15,6 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 
-// ==================== CONSTANTS ====================
 const int WINDOW_WIDTH  = 800;
 const int WINDOW_HEIGHT = 600;
 const int BRICK_ROWS    = 6;
@@ -41,7 +40,6 @@ const float BULLET_SPEED  = 8.0f;
 const int MAX_LEVELS      = 3;
 const int MAX_HIGH_SCORES = 5;
 
-// ==================== ENUMS ====================
 enum GameState { MENU, PLAYING, PAUSED, GAME_OVER, WIN, HELP, HIGH_SCORE };
 enum PerkType  {
     PERK_EXTRA_LIFE,
@@ -54,7 +52,6 @@ enum PerkType  {
     PERK_NONE
 };
 
-// ==================== STRUCTURES ====================
 struct Brick {
     float x, y;
     bool  active;
