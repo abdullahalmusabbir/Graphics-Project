@@ -7,33 +7,43 @@
 #include <cstdlib>
 #include <sstream>
 #include <algorithm>
+#include <fstream>
 
-const int WINDOW_WIDTH = 800;
+#ifdef _WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#endif
+
+// ==================== CONSTANTS ====================
+const int WINDOW_WIDTH  = 800;
 const int WINDOW_HEIGHT = 600;
-const int BRICK_ROWS = 6;
-const int BRICK_COLS = 10;
-const float BRICK_WIDTH = 70.0f;
-const float BRICK_HEIGHT = 25.0f;
+const int BRICK_ROWS    = 6;
+const int BRICK_COLS    = 10;
+const float BRICK_WIDTH   = 70.0f;
+const float BRICK_HEIGHT  = 25.0f;
 const float BRICK_PADDING = 5.0f;
 const float BRICK_START_X = 25.0f;
 const float BRICK_START_Y = 420.0f;
 const float PADDLE_WIDTH_DEFAULT = 100.0f;
 const float PADDLE_HEIGHT = 15.0f;
-const float PADDLE_Y = 30.0f;
-const float PADDLE_SPEED = 8.0f;
-const float BALL_RADIUS = 10.0f;
-const float BALL_SPEED_INITIAL = 4.0f;
-const float BALL_SPEED_INCREMENT = 0.0005f;
-const float PERK_WIDTH = 20.0f;
+const float PADDLE_Y      = 30.0f;
+const float PADDLE_SPEED  = 8.0f;
+const float BALL_RADIUS   = 10.0f;
+const float BALL_SPEED_INITIAL   = 4.0f;
+const float BALL_SPEED_INCREMENT = 0.0003f;
+const float PERK_WIDTH  = 20.0f;
 const float PERK_HEIGHT = 20.0f;
-const float PERK_SPEED = 2.5f;
-const float BULLET_WIDTH = 5.0f;
+const float PERK_SPEED  = 2.5f;
+const float BULLET_WIDTH  = 5.0f;
 const float BULLET_HEIGHT = 12.0f;
-const float BULLET_SPEED = 8.0f;
-const int MAX_LEVELS = 3;
+const float BULLET_SPEED  = 8.0f;
+const int MAX_LEVELS      = 3;
+const int MAX_HIGH_SCORES = 5;
 
-enum GameState { MENU, PLAYING, PAUSED, GAME_OVER, WIN, HELP };
-enum PerkType {
+// ==================== ENUMS ====================
+enum GameState { MENU, PLAYING, PAUSED, GAME_OVER, WIN, HELP, HIGH_SCORE };
+enum PerkType  {
     PERK_EXTRA_LIFE,
     PERK_FASTER_BALL,
     PERK_WIDER_PADDLE,
@@ -44,1108 +54,1133 @@ enum PerkType {
     PERK_NONE
 };
 
+// ==================== STRUCTURES ====================
 struct Brick {
     float x, y;
-    bool active;
-    int health;
+    bool  active;
+    int   health;
     float r, g, b;
     PerkType perk;
-    bool isWall;
+    bool  isWall;
 };
-
 struct Ball {
-    float x, y;
-    float dx, dy;
-    float speed;
-    bool active;
-    bool isFireball;
+    float x, y, dx, dy, speed;
+    bool  active, isFireball;
     float fireTimer;
 };
+struct Paddle { float x, y, width; };
+struct Perk   { float x, y, dy, r, g, b; PerkType type; bool active; };
+struct Bullet { float x, y; bool active; };
+struct HighScoreEntry { int score, level; float time; };
 
-struct Paddle {
-    float x, y;
-    float width;
-};
+// ==================== SOUND ====================
+// We use Windows MCI / PlaySound for nicer tones.
+// Each sound is a tiny inline WAV generated at runtime stored to a temp file,
+// OR we fall back to Beep() which is always available on Windows.
+// For simplicity and reliability we use Beep() sequences in a background
+// thread so the game never blocks.
 
-struct Perk {
-    float x, y;
-    float dy;
-    PerkType type;
-    bool active;
-    float r, g, b;
-};
+bool soundEnabled = true;
 
-struct Bullet {
-    float x, y;
-    bool active;
-};
+#ifdef _WIN32
+DWORD WINAPI beepThread(LPVOID param) {
+    // param encodes what to play
+    int id = (int)(intptr_t)param;
+    switch (id) {
+        case 0: // brick hit
+            Beep(880, 25);
+            break;
+        case 1: // paddle hit
+            Beep(440, 35);
+            Beep(550, 25);
+            break;
+        case 2: // perk collect
+            Beep(1047, 50);
+            Beep(1319, 50);
+            Beep(1568, 60);
+            break;
+        case 3: // death / life lost
+            Beep(350, 120);
+            Beep(280, 120);
+            Beep(220, 180);
+            break;
+        case 4: // game over
+            Beep(392, 120);
+            Beep(330, 120);
+            Beep(294, 120);
+            Beep(220, 250);
+            break;
+        case 5: // win / level clear
+            Beep(523,  80);
+            Beep(659,  80);
+            Beep(784,  80);
+            Beep(1047, 80);
+            Beep(1319, 160);
+            break;
+        case 6: // bullet fire
+            Beep(1200, 18);
+            break;
+        case 7: // level up fanfare
+            Beep(784,  80);
+            Beep(988,  80);
+            Beep(1175, 80);
+            Beep(1568, 160);
+            break;
+        case 8: // ball launch
+            Beep(660, 40);
+            Beep(880, 40);
+            break;
+        case 9: // fireball on
+            Beep(800, 30);
+            Beep(1000,30);
+            Beep(1200,40);
+            break;
+    }
+    return 0;
+}
 
-GameState gameState = MENU;
-GameState prevState = MENU;
-Ball ball;
-Paddle paddle;
-std::vector<Brick> bricks;
-std::vector<Perk> perks;
-std::vector<Bullet> bullets;
+void playSound(int id) {
+    if (!soundEnabled) return;
+    HANDLE h = CreateThread(NULL, 0, beepThread, (LPVOID)(intptr_t)id, 0, NULL);
+    if (h) CloseHandle(h);
+}
+#else
+void playSound(int /*id*/) {}
+#endif
 
-int lives = 3;
-int score = 0;
-float gameTime = 0.0f;
-bool ballOnPaddle = true;
-bool keyLeft = false;
-bool keyRight = false;
-int selectedMenu = 0;
-int selectedPauseMenu = 0;
+// Sound IDs
+#define SND_BRICK    0
+#define SND_PADDLE   1
+#define SND_PERK     2
+#define SND_DEATH    3
+#define SND_GAMEOVER 4
+#define SND_WIN      5
+#define SND_BULLET   6
+#define SND_LEVELUP  7
+#define SND_LAUNCH   8
+#define SND_FIREBALL 9
+
+// ==================== GLOBAL STATE ====================
+GameState gameState     = MENU;
+Ball      ball;
+Paddle    paddle;
+std::vector<Brick>          bricks;
+std::vector<Perk>           perks;
+std::vector<Bullet>         bullets;
+std::vector<HighScoreEntry> highScores;
+
+int   lives       = 3;
+int   score       = 0;
+float gameTime    = 0.0f;
+bool  ballOnPaddle = true;
+bool  keyLeft     = false;
+bool  keyRight    = false;
+int   selectedMenu      = 0;
+int   selectedPauseMenu = 0;
 float paddleWidth = PADDLE_WIDTH_DEFAULT;
-bool widerPaddleActive = false;
-float widerPaddleTimer = 0.0f;
-bool smallerPaddleActive = false;
-float smallerPaddleTimer = 0.0f;
-bool shootActive = false;
-float shootTimer = 0.0f;
+bool  widerPaddleActive   = false; float widerPaddleTimer   = 0.0f;
+bool  smallerPaddleActive = false; float smallerPaddleTimer = 0.0f;
+bool  shootActive    = false; float shootTimer    = 0.0f;
 float bulletCooldown = 0.0f;
-bool fireballActive = false;
-float fireballTimer = 0.0f;
-int currentLevel = 1;
+bool  fireballActive = false; float fireballTimer = 0.0f;
+int   currentLevel   = 1;
+float flashTimer     = 0.0f;
+float flashR = 1, flashG = 1, flashB = 1;
+bool  gameStarted    = false;   // true while a game is in progress
 
-float flashTimer = 0.0f;
-float flashR = 1.0f, flashG = 1.0f, flashB = 1.0f;
+// ==================== HIGH SCORE ====================
+const std::string HS_FILE = "dx_highscores.dat";
 
-void drawText(float x, float y, const std::string& text,
-    float r = 1.0f, float g = 1.0f, float b = 1.0f,
-    void* font = GLUT_BITMAP_HELVETICA_18) {
-    glColor3f(r, g, b);
-    glRasterPos2f(x, y);
-    for (char c : text) glutBitmapCharacter(font, c);
+void loadHighScores() {
+    highScores.clear();
+    std::ifstream f(HS_FILE.c_str(), std::ios::binary);
+    if (!f) return;
+    int n = 0;
+    f.read(reinterpret_cast<char*>(&n), sizeof(n));
+    for (int i = 0; i < n && i < MAX_HIGH_SCORES; i++) {
+        HighScoreEntry e;
+        f.read(reinterpret_cast<char*>(&e.score), sizeof(e.score));
+        f.read(reinterpret_cast<char*>(&e.time),  sizeof(e.time));
+        f.read(reinterpret_cast<char*>(&e.level), sizeof(e.level));
+        highScores.push_back(e);
+    }
+    f.close();
 }
 
-void drawTextLarge(float x, float y, const std::string& text,
-    float r = 1.0f, float g = 1.0f, float b = 1.0f) {
-    glColor3f(r, g, b);
-    glRasterPos2f(x, y);
-    for (char c : text) glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24, c);
+void saveHighScores() {
+    std::ofstream f(HS_FILE.c_str(), std::ios::binary | std::ios::trunc);
+    if (!f) return;
+    int n = (int)highScores.size();
+    f.write(reinterpret_cast<const char*>(&n), sizeof(n));
+    for (auto& e : highScores) {
+        f.write(reinterpret_cast<const char*>(&e.score), sizeof(e.score));
+        f.write(reinterpret_cast<const char*>(&e.time),  sizeof(e.time));
+        f.write(reinterpret_cast<const char*>(&e.level), sizeof(e.level));
+    }
+    f.close();
 }
 
-std::string intToString(int val) {
-    std::ostringstream oss; oss << val; return oss.str();
+void addHighScore(int sc, float tm, int lv) {
+    HighScoreEntry e; e.score = sc; e.time = tm; e.level = lv;
+    highScores.push_back(e);
+    std::sort(highScores.begin(), highScores.end(),
+        [](const HighScoreEntry& a, const HighScoreEntry& b){
+            return a.score > b.score;
+        });
+    if ((int)highScores.size() > MAX_HIGH_SCORES)
+        highScores.resize(MAX_HIGH_SCORES);
+    saveHighScores();
 }
 
-std::string floatToString(float val, int decimals = 1) {
-    std::ostringstream oss;
-    oss.precision(decimals);
-    oss << std::fixed << val;
-    return oss.str();
-}
+// ==================== UTILITY ====================
+std::string iStr(int v)               { std::ostringstream o; o<<v; return o.str(); }
+std::string fStr(float v,int d=1)     { std::ostringstream o; o.precision(d); o<<std::fixed<<v; return o.str(); }
 
-void drawRect(float x, float y, float w, float h,
-    float r, float g, float b, bool filled = true) {
-    glColor3f(r, g, b);
-    glBegin(filled ? GL_QUADS : GL_LINE_LOOP);
-    glVertex2f(x, y);
-    glVertex2f(x + w, y);
-    glVertex2f(x + w, y + h);
-    glVertex2f(x, y + h);
+void drawText(float x,float y,const std::string& s,
+              float r=1,float g=1,float b=1,void* font=GLUT_BITMAP_HELVETICA_18){
+    glColor3f(r,g,b); glRasterPos2f(x,y);
+    for(char c:s) glutBitmapCharacter(font,c);
+}
+void drawTextL(float x,float y,const std::string& s,float r=1,float g=1,float b=1){
+    glColor3f(r,g,b); glRasterPos2f(x,y);
+    for(char c:s) glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24,c);
+}
+void drawRect(float x,float y,float w,float h,float r,float g,float b,bool fill=true){
+    glColor3f(r,g,b);
+    glBegin(fill?GL_QUADS:GL_LINE_LOOP);
+    glVertex2f(x,y); glVertex2f(x+w,y); glVertex2f(x+w,y+h); glVertex2f(x,y+h);
     glEnd();
 }
-
-void drawCircle(float cx, float cy, float radius,
-    float r, float g, float b, bool filled = true) {
-    glColor3f(r, g, b);
-    glBegin(filled ? GL_POLYGON : GL_LINE_LOOP);
-    int segments = 32;
-    for (int i = 0; i < segments; i++) {
-        float angle = 2.0f * 3.14159265f * i / segments;
-        glVertex2f(cx + radius * cos(angle), cy + radius * sin(angle));
+void drawCircle(float cx,float cy,float rad,float r,float g,float b,bool fill=true){
+    glColor3f(r,g,b);
+    glBegin(fill?GL_POLYGON:GL_LINE_LOOP);
+    for(int i=0;i<32;i++){
+        float a=2*3.14159265f*i/32;
+        glVertex2f(cx+rad*cosf(a),cy+rad*sinf(a));
     }
     glEnd();
 }
 
-void draw_pixel(int x, int y) {
-    glBegin(GL_POINTS);
-    glVertex2i(x, y);
-    glEnd();
-}
+// ==================== BRESENHAM LINE ====================
+void draw_px(int x,int y){ glBegin(GL_POINTS); glVertex2i(x,y); glEnd(); }
 
-void drawLine(int x1, int y1, int x2, int y2) {
-    int dx, dy, i, e;
-    int incx, incy, inc1, inc2;
-    int x, y;
-
-    dx = x2 - x1;
-    dy = y2 - y1;
-
-    if (dx < 0) dx = -dx;
-    if (dy < 0) dy = -dy;
-
-    incx = 1;
-    if (x2 < x1) incx = -1;
-    incy = 1;
-    if (y2 < y1) incy = -1;
-
-    x = x1; y = y1;
-
-    if (dx > dy) {
-        draw_pixel(x, y);
-        e = 2 * dy - dx;
-        inc1 = 2 * (dy - dx);
-        inc2 = 2 * dy;
-        for (i = 0; i < dx; i++) {
-            if (e >= 0) {
-                y += incy;
-                e += inc1;
-            } else {
-                e += inc2;
-            }
-            x += incx;
-            draw_pixel(x, y);
-        }
-    } else {
-        draw_pixel(x, y);
-        e = 2 * dx - dy;
-        inc1 = 2 * (dx - dy);
-        inc2 = 2 * dx;
-        for (i = 0; i < dy; i++) {
-            if (e >= 0) {
-                x += incx;
-                e += inc1;
-            } else {
-                e += inc2;
-            }
-            y += incy;
-            draw_pixel(x, y);
-        }
+void bLine(int x1,int y1,int x2,int y2){
+    int dx=abs(x2-x1), dy=abs(y2-y1);
+    int sx=(x2>x1)?1:-1, sy=(y2>y1)?1:-1;
+    int x=x1,y=y1,e;
+    if(dx>dy){ e=2*dy-dx;
+        for(int i=0;i<dx;i++){ draw_px(x,y); if(e>=0){y+=sy;e+=2*(dy-dx);}else e+=2*dy; x+=sx; }
+    }else{ e=2*dx-dy;
+        for(int i=0;i<dy;i++){ draw_px(x,y); if(e>=0){x+=sx;e+=2*(dx-dy);}else e+=2*dx; y+=sy; }
     }
+    draw_px(x2,y2);
 }
 
-void drawBresenhamRect(float fx, float fy, float fw, float fh,
-    float r, float g, float b) {
-    int x1 = (int)fx;
-    int y1 = (int)fy;
-    int x2 = (int)(fx + fw);
-    int y2 = (int)(fy + fh);
-
-    glColor3f(r, g, b);
-    glPointSize(1.0f);
-
-    for (int row = y1; row <= y2; row++) {
-        drawLine(x1, row, x2, row);
-    }
+void bRect(float fx,float fy,float fw,float fh,float r,float g,float b){
+    glColor3f(r,g,b); glPointSize(1);
+    int x1=(int)fx,y1=(int)fy,x2=(int)(fx+fw),y2=(int)(fy+fh);
+    for(int row=y1;row<=y2;row++) bLine(x1,row,x2,row);
+}
+void bRectOut(float fx,float fy,float fw,float fh,float r,float g,float b){
+    glColor3f(r,g,b); glPointSize(1);
+    int x1=(int)fx,y1=(int)fy,x2=(int)(fx+fw),y2=(int)(fy+fh);
+    bLine(x1,y1,x2,y1); bLine(x2,y1,x2,y2);
+    bLine(x2,y2,x1,y2); bLine(x1,y2,x1,y1);
 }
 
-void drawBresenhamRectOutline(float fx, float fy, float fw, float fh,
-    float r, float g, float b) {
-    int x1 = (int)fx;
-    int y1 = (int)fy;
-    int x2 = (int)(fx + fw);
-    int y2 = (int)(fy + fh);
-
-    glColor3f(r, g, b);
-    glPointSize(1.0f);
-
-    drawLine(x1, y1, x2, y1); 
-    drawLine(x2, y1, x2, y2); 
-    drawLine(x2, y2, x1, y2); 
-    drawLine(x1, y2, x1, y1); 
-}
-
-int g_cx, g_cy;
-
-void plotCirclePoints(int x, int y) {
-    glBegin(GL_POINTS);
-    glVertex2i(g_cx + x, g_cy + y);
-    glVertex2i(g_cx - x, g_cy + y);
-    glVertex2i(g_cx + x, g_cy - y);
-    glVertex2i(g_cx - x, g_cy - y);
-    glVertex2i(g_cx + y, g_cy + x);
-    glVertex2i(g_cx - y, g_cy + x);
-    glVertex2i(g_cx + y, g_cy - x);
-    glVertex2i(g_cx - y, g_cy - x);
-    glEnd();
-}
-
-void midpointCircleFilled(int cx, int cy, int r) {
-    g_cx = cx;
-    g_cy = cy;
-
-    int x = 0;
-    int y = r;
-    int d = 1 - r;
-
-    while (x <= y) {
+// ==================== MIDPOINT CIRCLE ====================
+int g_cx,g_cy;
+void mcFill(int cx,int cy,int r){
+    g_cx=cx; g_cy=cy;
+    int x=0,y=r,d=1-r;
+    while(x<=y){
         glBegin(GL_LINES);
-        glVertex2i(cx - y, cy + x);
-        glVertex2i(cx + y, cy + x);
-
-        glVertex2i(cx - y, cy - x);
-        glVertex2i(cx + y, cy - x);
-
-        glVertex2i(cx - x, cy + y);
-        glVertex2i(cx + x, cy + y);
-
-        glVertex2i(cx - x, cy - y);
-        glVertex2i(cx + x, cy - y);
+        glVertex2i(cx-y,cy+x); glVertex2i(cx+y,cy+x);
+        glVertex2i(cx-y,cy-x); glVertex2i(cx+y,cy-x);
+        glVertex2i(cx-x,cy+y); glVertex2i(cx+x,cy+y);
+        glVertex2i(cx-x,cy-y); glVertex2i(cx+x,cy-y);
         glEnd();
-
-        if (d < 0) {
-            d += 2 * x + 3;
-        } else {
-            d += 2 * (x - y) + 5;
-            y--;
-        }
-        x++;
+        if(d<0) d+=2*x+3; else{d+=2*(x-y)+5;y--;} x++;
     }
 }
 
-void midpointCircleOutline(int cx, int cy, int r) {
-    g_cx = cx;
-    g_cy = cy;
-
-    int x = 0;
-    int y = r;
-    int d = 1 - r;
-
-    glPointSize(1.0f);
-    while (x <= y) {
-        plotCirclePoints(x, y);
-
-        if (d < 0) {
-            d += 2 * x + 3;
-        } else {
-            d += 2 * (x - y) + 5;
-            y--;
-        }
-        x++;
-    }
-}
-
-PerkType randomPerk() {
-    int r = rand() % 10;
-    if (r == 0) return PERK_EXTRA_LIFE;
-    if (r == 1) return PERK_FASTER_BALL;
-    if (r == 2) return PERK_WIDER_PADDLE;
-    if (r == 3) return PERK_FIREBALL;
-    if (r == 4) return PERK_DEATH;
-    if (r == 5) return PERK_SMALLER_PADDLE;
-    if (r == 6) return PERK_SHOOT;
+// ==================== GAME INIT ====================
+PerkType randomPerk(){
+    int r=rand()%10;
+    if(r==0) return PERK_EXTRA_LIFE;
+    if(r==1) return PERK_FASTER_BALL;
+    if(r==2) return PERK_WIDER_PADDLE;
+    if(r==3) return PERK_FIREBALL;
+    if(r==4) return PERK_DEATH;
+    if(r==5) return PERK_SMALLER_PADDLE;
+    if(r==6) return PERK_SHOOT;
     return PERK_NONE;
 }
 
-void getBrickColor(int row, float& r, float& g, float& b) {
-    switch (row) {
-    case 0: r = 1.0f; g = 0.2f; b = 0.2f; break;
-    case 1: r = 1.0f; g = 0.5f; b = 0.0f; break;
-    case 2: r = 1.0f; g = 1.0f; b = 0.0f; break;
-    case 3: r = 0.0f; g = 0.8f; b = 0.0f; break;
-    case 4: r = 0.0f; g = 0.5f; b = 1.0f; break;
-    case 5: r = 0.6f; g = 0.0f; b = 0.8f; break;
-    default: r = 1.0f; g = 1.0f; b = 1.0f; break;
+void getBrickColor(int row,float&r,float&g,float&b){
+    switch(row){
+        case 0:r=1;g=.2f;b=.2f;break;
+        case 1:r=1;g=.5f;b=0;break;
+        case 2:r=1;g=1;b=0;break;
+        case 3:r=0;g=.8f;b=0;break;
+        case 4:r=0;g=.5f;b=1;break;
+        case 5:r=.6f;g=0;b=.8f;break;
+        default:r=g=b=1;
     }
 }
 
-void initBricks() {
+void initBricks(){
     bricks.clear();
-    for (int row = 0; row < BRICK_ROWS; row++) {
-        for (int col = 0; col < BRICK_COLS; col++) {
+    for(int row=0;row<BRICK_ROWS;row++){
+        for(int col=0;col<BRICK_COLS;col++){
             Brick b;
-            b.x = BRICK_START_X + col * (BRICK_WIDTH + BRICK_PADDING);
-            b.y = BRICK_START_Y - row * (BRICK_HEIGHT + BRICK_PADDING);
-            b.active = true;
-            b.isWall = false;
-
-            if (currentLevel == 1) {
-                b.health = (row < 2) ? 2 : 1;
-                getBrickColor(row, b.r, b.g, b.b);
-                b.isWall = false;
-            } else if (currentLevel == 2) {
-                if ((row + col) % 4 == 0) {
-                    b.health = 3;
-                    b.r = 0.5f; b.g = 0.5f; b.b = 0.5f;
-                    b.isWall = true;
-                } else {
-                    b.health = (row < 2) ? 2 : 1;
-                    getBrickColor(row, b.r, b.g, b.b);
-                    b.isWall = false;
-                }
-            } else if (currentLevel >= 3) {
-                bool isWallBrick = (col % 3 == 0 && row % 2 == 0) ||
-                    (col % 3 == 1 && row % 2 == 1);
-                if (isWallBrick) {
-                    b.health = 4;
-                    b.r = 0.45f; b.g = 0.3f; b.b = 0.2f;
-                    b.isWall = true;
-                } else {
-                    b.health = (row < 3) ? 2 : 1;
-                    getBrickColor(row, b.r, b.g, b.b);
-                    b.isWall = false;
-                }
+            b.x=BRICK_START_X+col*(BRICK_WIDTH+BRICK_PADDING);
+            b.y=BRICK_START_Y-row*(BRICK_HEIGHT+BRICK_PADDING);
+            b.active=true; b.isWall=false;
+            if(currentLevel==1){
+                b.health=(row<2)?2:1;
+                getBrickColor(row,b.r,b.g,b.b);
+            }else if(currentLevel==2){
+                if((row+col)%4==0){b.health=3;b.r=.5f;b.g=.5f;b.b=.5f;b.isWall=true;}
+                else{b.health=(row<2)?2:1; getBrickColor(row,b.r,b.g,b.b);}
+            }else{
+                bool w=(col%3==0&&row%2==0)||(col%3==1&&row%2==1);
+                if(w){b.health=4;b.r=.45f;b.g=.3f;b.b=.2f;b.isWall=true;}
+                else{b.health=(row<3)?2:1; getBrickColor(row,b.r,b.g,b.b);}
             }
-
-            b.perk = randomPerk();
+            b.perk=randomPerk();
             bricks.push_back(b);
         }
     }
 }
 
-void initBall() {
-    ball.x = paddle.x + paddle.width / 2.0f;
+// Reset paddle to center, fixed Y, default width
+void resetPaddle(){
+    paddle.width = paddleWidth;
+    paddle.x     = WINDOW_WIDTH/2.0f - paddle.width/2.0f;
+    paddle.y     = PADDLE_Y;
+}
+
+void initBall(){
+    // Place ball on paddle center
+    ball.x = paddle.x + paddle.width/2.0f;
     ball.y = PADDLE_Y + PADDLE_HEIGHT + BALL_RADIUS + 1.0f;
-    ball.speed = BALL_SPEED_INITIAL + (currentLevel - 1) * 0.5f;
-    ball.dx = ball.speed * 0.7f;
-    ball.dy = ball.speed * 0.7f;
-    ball.active = true;
-    ball.isFireball = false;
-    ball.fireTimer = 0.0f;
-    ballOnPaddle = true;
+    ball.speed = BALL_SPEED_INITIAL + (currentLevel-1)*0.5f;
+    ball.dx = ball.speed*0.7f;
+    ball.dy = ball.speed*0.7f;
+    ball.active      = true;
+    ball.isFireball  = false;
+    ball.fireTimer   = 0.0f;
+    ballOnPaddle     = true;
 }
 
-void initGame() {
-    lives = 3;
-    score = 0;
-    gameTime = 0.0f;
+void initGame(){
+    lives      = 3;
+    score      = 0;
+    gameTime   = 0.0f;
     currentLevel = 1;
-    paddleWidth = PADDLE_WIDTH_DEFAULT;
-    widerPaddleActive = false;
-    widerPaddleTimer = 0.0f;
-    smallerPaddleActive = false;
-    smallerPaddleTimer = 0.0f;
-    shootActive = false;
-    shootTimer = 0.0f;
-    bulletCooldown = 0.0f;
-    fireballActive = false;
-    fireballTimer = 0.0f;
-    flashTimer = 0.0f;
-    perks.clear();
-    bullets.clear();
-
-    paddle.x = WINDOW_WIDTH / 2.0f - paddleWidth / 2.0f;
-    paddle.y = PADDLE_Y;
-    paddle.width = paddleWidth;
-
+    paddleWidth  = PADDLE_WIDTH_DEFAULT;
+    widerPaddleActive=false;   widerPaddleTimer=0;
+    smallerPaddleActive=false; smallerPaddleTimer=0;
+    shootActive=false;  shootTimer=0; bulletCooldown=0;
+    fireballActive=false; fireballTimer=0;
+    flashTimer=0;
+    perks.clear(); bullets.clear();
+    resetPaddle();
     initBricks();
     initBall();
-    gameState = PLAYING;
-    prevState = PLAYING;
+    gameStarted = true;
+    gameState   = PLAYING;
 }
 
-void nextLevel() {
+void nextLevel(){
+    playSound(SND_LEVELUP);
     currentLevel++;
-    paddleWidth = PADDLE_WIDTH_DEFAULT;
-    widerPaddleActive = false;
-    widerPaddleTimer = 0.0f;
-    smallerPaddleActive = false;
-    smallerPaddleTimer = 0.0f;
-    shootActive = false;
-    shootTimer = 0.0f;
-    bulletCooldown = 0.0f;
-    fireballActive = false;
-    fireballTimer = 0.0f;
-    perks.clear();
-    bullets.clear();
-    paddle.x = WINDOW_WIDTH / 2.0f - paddleWidth / 2.0f;
-    paddle.width = paddleWidth;
+    paddleWidth=PADDLE_WIDTH_DEFAULT;
+    widerPaddleActive=false;   widerPaddleTimer=0;
+    smallerPaddleActive=false; smallerPaddleTimer=0;
+    shootActive=false; shootTimer=0; bulletCooldown=0;
+    fireballActive=false; fireballTimer=0;
+    perks.clear(); bullets.clear();
+    resetPaddle();
     initBricks();
     initBall();
-    gameState = PLAYING;
+    gameState=PLAYING;
 }
 
-void spawnPerk(float x, float y, PerkType type) {
-    if (type == PERK_NONE) return;
-    Perk p;
-    p.x = x; p.y = y;
-    p.dy = -PERK_SPEED;
-    p.type = type;
-    p.active = true;
-    if (type == PERK_EXTRA_LIFE)      { p.r = 0.0f; p.g = 1.0f; p.b = 0.0f; }
-    else if (type == PERK_FASTER_BALL) { p.r = 1.0f; p.g = 0.3f; p.b = 0.0f; }
-    else if (type == PERK_WIDER_PADDLE){ p.r = 0.0f; p.g = 0.5f; p.b = 1.0f; }
-    else if (type == PERK_FIREBALL)    { p.r = 1.0f; p.g = 0.4f; p.b = 0.0f; }
-    else if (type == PERK_DEATH)       { p.r = 0.8f; p.g = 0.0f; p.b = 0.8f; }
-    else if (type == PERK_SMALLER_PADDLE){ p.r = 1.0f; p.g = 0.0f; p.b = 0.5f; }
-    else if (type == PERK_SHOOT)       { p.r = 1.0f; p.g = 1.0f; p.b = 0.0f; }
+// ==================== PERKS ====================
+void spawnPerk(float x,float y,PerkType type){
+    if(type==PERK_NONE) return;
+    Perk p; p.x=x; p.y=y; p.dy=-PERK_SPEED; p.type=type; p.active=true;
+    switch(type){
+        case PERK_EXTRA_LIFE:     p.r=0;p.g=1;p.b=0;break;
+        case PERK_FASTER_BALL:    p.r=1;p.g=.3f;p.b=0;break;
+        case PERK_WIDER_PADDLE:   p.r=0;p.g=.5f;p.b=1;break;
+        case PERK_FIREBALL:       p.r=1;p.g=.4f;p.b=0;break;
+        case PERK_DEATH:          p.r=.8f;p.g=0;p.b=.8f;break;
+        case PERK_SMALLER_PADDLE: p.r=1;p.g=0;p.b=.5f;break;
+        case PERK_SHOOT:          p.r=1;p.g=1;p.b=0;break;
+        default:break;
+    }
     perks.push_back(p);
 }
 
-void applyPerk(PerkType type) {
-    if (type == PERK_EXTRA_LIFE) {
-        lives++;
-    } else if (type == PERK_FASTER_BALL) {
-        ball.speed += 1.5f;
-        float mag = sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
-        if (mag > 0) { ball.dx = (ball.dx / mag) * ball.speed; ball.dy = (ball.dy / mag) * ball.speed; }
-    } else if (type == PERK_WIDER_PADDLE) {
-        widerPaddleActive = true;
-        widerPaddleTimer = 10.0f;
-        smallerPaddleActive = false;
-        paddle.width = PADDLE_WIDTH_DEFAULT * 1.7f;
-    } else if (type == PERK_FIREBALL) {
-        ball.isFireball = true;
-        fireballActive = true;
-        fireballTimer = 8.0f;
-        ball.fireTimer = 8.0f;
-    } else if (type == PERK_DEATH) {
-        flashTimer = 0.5f;
-        flashR = 1.0f; flashG = 0.0f; flashB = 0.0f;
-        lives--;
-        if (lives <= 0) {
-            gameState = GAME_OVER;
-        } else {
-            initBall();
-        }
-    } else if (type == PERK_SMALLER_PADDLE) {
-        smallerPaddleActive = true;
-        smallerPaddleTimer = 8.0f;
-        widerPaddleActive = false;
-        paddle.width = PADDLE_WIDTH_DEFAULT * 0.5f;
-    } else if (type == PERK_SHOOT) {
-        shootActive = true;
-        shootTimer = 12.0f;
-        bulletCooldown = 0.0f;
+void applyPerk(PerkType type){
+    switch(type){
+        case PERK_EXTRA_LIFE:
+            lives++;
+            playSound(SND_PERK);
+            break;
+        case PERK_FASTER_BALL:{
+            ball.speed+=1.5f;
+            float m=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
+            if(m>0){ball.dx=ball.dx/m*ball.speed;ball.dy=ball.dy/m*ball.speed;}
+            playSound(SND_PERK);
+            break;}
+        case PERK_WIDER_PADDLE:
+            widerPaddleActive=true; widerPaddleTimer=10;
+            smallerPaddleActive=false;
+            paddle.width=PADDLE_WIDTH_DEFAULT*1.7f;
+            paddleWidth=paddle.width;
+            playSound(SND_PERK);
+            break;
+        case PERK_FIREBALL:
+            ball.isFireball=true; fireballActive=true;
+            fireballTimer=8; ball.fireTimer=8;
+            playSound(SND_FIREBALL);
+            break;
+        case PERK_DEATH:
+            flashTimer=.5f; flashR=1;flashG=0;flashB=0;
+            playSound(SND_DEATH);
+            lives--;
+            if(lives<=0){
+                addHighScore(score,gameTime,currentLevel);
+                playSound(SND_GAMEOVER);
+                gameStarted=false;
+                gameState=GAME_OVER;
+            }else initBall();
+            break;
+        case PERK_SMALLER_PADDLE:
+            smallerPaddleActive=true; smallerPaddleTimer=8;
+            widerPaddleActive=false;
+            paddle.width=PADDLE_WIDTH_DEFAULT*0.5f;
+            paddleWidth=paddle.width;
+            playSound(SND_PERK);
+            break;
+        case PERK_SHOOT:
+            shootActive=true; shootTimer=12; bulletCooldown=0;
+            playSound(SND_PERK);
+            break;
+        default:break;
     }
 }
 
-bool checkBallBrickCollision(Brick& brick, bool pierce) {
-    if (!brick.active) return false;
-    float ballLeft   = ball.x - BALL_RADIUS;
-    float ballRight  = ball.x + BALL_RADIUS;
-    float ballBottom = ball.y - BALL_RADIUS;
-    float ballTop    = ball.y + BALL_RADIUS;
-    float brickLeft   = brick.x;
-    float brickRight  = brick.x + BRICK_WIDTH;
-    float brickBottom = brick.y;
-    float brickTop    = brick.y + BRICK_HEIGHT;
-
-    if (ballRight < brickLeft || ballLeft > brickRight) return false;
-    if (ballTop < brickBottom || ballBottom > brickTop) return false;
-
-    if (!pierce) {
-        float overlapLeft   = ballRight - brickLeft;
-        float overlapRight  = brickRight - ballLeft;
-        float overlapBottom = ballTop - brickBottom;
-        float overlapTop    = brickTop - ballBottom;
-        float minOverlapX = std::min(overlapLeft, overlapRight);
-        float minOverlapY = std::min(overlapBottom, overlapTop);
-        if (minOverlapX < minOverlapY) ball.dx = -ball.dx;
-        else ball.dy = -ball.dy;
+// ==================== COLLISION ====================
+bool ballBrickCollide(Brick& bk,bool pierce){
+    if(!bk.active) return false;
+    float bl=ball.x-BALL_RADIUS,br=ball.x+BALL_RADIUS;
+    float bb=ball.y-BALL_RADIUS,bt=ball.y+BALL_RADIUS;
+    if(br<bk.x||bl>bk.x+BRICK_WIDTH) return false;
+    if(bt<bk.y||bb>bk.y+BRICK_HEIGHT) return false;
+    if(!pierce){
+        float ol=br-bk.x, or2=bk.x+BRICK_WIDTH-bl;
+        float ob=bt-bk.y, ot=bk.y+BRICK_HEIGHT-bb;
+        float mx=std::min(ol,or2), my=std::min(ob,ot);
+        if(mx<my) ball.dx=-ball.dx; else ball.dy=-ball.dy;
     }
     return true;
 }
 
-bool checkBulletBrickCollision(Bullet& bullet, Brick& brick) {
-    if (!brick.active || !bullet.active) return false;
-    float bx = bullet.x - BULLET_WIDTH / 2;
-    float by = bullet.y;
-    if (bx + BULLET_WIDTH < brick.x || bx > brick.x + BRICK_WIDTH) return false;
-    if (by + BULLET_HEIGHT < brick.y || by > brick.y + BRICK_HEIGHT) return false;
+bool bulletBrickCollide(Bullet& blt,Brick& bk){
+    if(!bk.active||!blt.active) return false;
+    float bx=blt.x-BULLET_WIDTH/2, by=blt.y;
+    if(bx+BULLET_WIDTH<bk.x||bx>bk.x+BRICK_WIDTH) return false;
+    if(by+BULLET_HEIGHT<bk.y||by>bk.y+BRICK_HEIGHT) return false;
     return true;
 }
 
-void updateGame(float dt) {
-    if (gameState != PLAYING) return;
-    gameTime += dt;
+// ==================== UPDATE ====================
+void updateGame(float dt){
+    if(gameState!=PLAYING) return;
+    gameTime+=dt;
+    if(flashTimer>0) flashTimer-=dt;
 
-    if (flashTimer > 0) flashTimer -= dt;
+    // Gradually increase speed
+    ball.speed+=BALL_SPEED_INCREMENT;
 
-    ball.speed += BALL_SPEED_INCREMENT;
-    float mag = sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
-    if (mag > 0 && !ballOnPaddle) {
-        ball.dx = (ball.dx / mag) * ball.speed;
-        ball.dy = (ball.dy / mag) * ball.speed;
+    // Perk timers
+    if(fireballActive){
+        fireballTimer-=dt; ball.fireTimer-=dt;
+        if(fireballTimer<=0){fireballActive=false;ball.isFireball=false;ball.fireTimer=0;}
     }
-
-    if (fireballActive) {
-        fireballTimer -= dt;
-        ball.fireTimer -= dt;
-        if (fireballTimer <= 0) {
-            fireballActive = false;
-            ball.isFireball = false;
-            ball.fireTimer = 0.0f;
+    if(widerPaddleActive){
+        widerPaddleTimer-=dt;
+        if(widerPaddleTimer<=0){
+            widerPaddleActive=false;
+            if(!smallerPaddleActive){paddle.width=PADDLE_WIDTH_DEFAULT;paddleWidth=PADDLE_WIDTH_DEFAULT;}
         }
     }
-
-    if (widerPaddleActive) {
-        widerPaddleTimer -= dt;
-        if (widerPaddleTimer <= 0) {
-            widerPaddleActive = false;
-            if (!smallerPaddleActive)
-                paddle.width = PADDLE_WIDTH_DEFAULT;
+    if(smallerPaddleActive){
+        smallerPaddleTimer-=dt;
+        if(smallerPaddleTimer<=0){
+            smallerPaddleActive=false;
+            if(!widerPaddleActive){paddle.width=PADDLE_WIDTH_DEFAULT;paddleWidth=PADDLE_WIDTH_DEFAULT;}
         }
     }
-
-    if (smallerPaddleActive) {
-        smallerPaddleTimer -= dt;
-        if (smallerPaddleTimer <= 0) {
-            smallerPaddleActive = false;
-            if (!widerPaddleActive)
-                paddle.width = PADDLE_WIDTH_DEFAULT;
-        }
+    if(shootActive){
+        shootTimer-=dt; bulletCooldown-=dt;
+        if(shootTimer<=0){shootActive=false;bullets.clear();}
     }
 
-    if (shootActive) {
-        shootTimer -= dt;
-        bulletCooldown -= dt;
-        if (shootTimer <= 0) {
-            shootActive = false;
-            bullets.clear();
-        }
+    // Paddle keyboard movement
+    if(keyLeft) {
+        paddle.x-=PADDLE_SPEED;
+        if(paddle.x<0) paddle.x=0;
+    }
+    if(keyRight){
+        paddle.x+=PADDLE_SPEED;
+        if(paddle.x+paddle.width>WINDOW_WIDTH) paddle.x=WINDOW_WIDTH-paddle.width;
     }
 
-    if (keyLeft)  { paddle.x -= PADDLE_SPEED; if (paddle.x < 0) paddle.x = 0; }
-    if (keyRight) { paddle.x += PADDLE_SPEED; if (paddle.x + paddle.width > WINDOW_WIDTH) paddle.x = WINDOW_WIDTH - paddle.width; }
-
-    if (ballOnPaddle) {
-        ball.x = paddle.x + paddle.width / 2.0f;
-        ball.y = PADDLE_Y + PADDLE_HEIGHT + BALL_RADIUS + 1.0f;
+    // Ball sits on paddle until launched
+    if(ballOnPaddle){
+        ball.x=paddle.x+paddle.width/2.0f;
+        ball.y=PADDLE_Y+PADDLE_HEIGHT+BALL_RADIUS+1.0f;
         return;
     }
 
-    ball.x += ball.dx;
-    ball.y += ball.dy;
+    // Normalise ball direction to current speed
+    float mag=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
+    if(mag>0){ball.dx=ball.dx/mag*ball.speed; ball.dy=ball.dy/mag*ball.speed;}
 
-    if (ball.x - BALL_RADIUS < 0)             { ball.x = BALL_RADIUS; ball.dx = fabs(ball.dx); }
-    if (ball.x + BALL_RADIUS > WINDOW_WIDTH)  { ball.x = WINDOW_WIDTH - BALL_RADIUS; ball.dx = -fabs(ball.dx); }
-    if (ball.y + BALL_RADIUS > WINDOW_HEIGHT) { ball.y = WINDOW_HEIGHT - BALL_RADIUS; ball.dy = -fabs(ball.dy); }
+    ball.x+=ball.dx; ball.y+=ball.dy;
 
-    if (ball.y - BALL_RADIUS <= PADDLE_Y + PADDLE_HEIGHT &&
-        ball.y - BALL_RADIUS >= PADDLE_Y &&
-        ball.x >= paddle.x && ball.x <= paddle.x + paddle.width &&
-        ball.dy < 0) {
-        ball.dy = fabs(ball.dy);
-        float hitPos = (ball.x - paddle.x) / paddle.width;
-        float angle = (hitPos - 0.5f) * 2.0f;
-        ball.dx = ball.speed * angle * 0.8f;
-        float newMag = sqrt(ball.dx * ball.dx + ball.dy * ball.dy);
-        if (newMag > 0) { ball.dx = (ball.dx / newMag) * ball.speed; ball.dy = (ball.dy / newMag) * ball.speed; }
-        if (ball.dy > -1.0f) ball.dy = 1.0f;
+    // Wall bounce
+    if(ball.x-BALL_RADIUS<0)            {ball.x=BALL_RADIUS;      ball.dx= fabsf(ball.dx);}
+    if(ball.x+BALL_RADIUS>WINDOW_WIDTH) {ball.x=WINDOW_WIDTH-BALL_RADIUS; ball.dx=-fabsf(ball.dx);}
+    if(ball.y+BALL_RADIUS>WINDOW_HEIGHT){ball.y=WINDOW_HEIGHT-BALL_RADIUS;ball.dy=-fabsf(ball.dy);}
+
+    // Paddle collision
+    if(ball.dy<0 &&
+       ball.y-BALL_RADIUS<=PADDLE_Y+PADDLE_HEIGHT &&
+       ball.y-BALL_RADIUS>=PADDLE_Y-4 &&
+       ball.x>=paddle.x && ball.x<=paddle.x+paddle.width){
+        playSound(SND_PADDLE);
+        ball.dy=fabsf(ball.dy);
+        float hit=(ball.x-paddle.x)/paddle.width;   // 0..1
+        float ang=(hit-0.5f)*2.0f;                   // -1..+1
+        ball.dx=ball.speed*ang*0.85f;
+        float nm=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
+        if(nm>0){ball.dx=ball.dx/nm*ball.speed; ball.dy=ball.dy/nm*ball.speed;}
+        if(fabsf(ball.dy)<0.8f) ball.dy=(ball.dy<0)?-0.8f:0.8f;
     }
 
-    if (ball.y - BALL_RADIUS < 0) {
+    // Ball lost
+    if(ball.y-BALL_RADIUS<0){
+        playSound(SND_DEATH);
         lives--;
-        if (lives <= 0) gameState = GAME_OVER;
-        else initBall();
+        if(lives<=0){
+            addHighScore(score,gameTime,currentLevel);
+            playSound(SND_GAMEOVER);
+            gameStarted=false;
+            gameState=GAME_OVER;
+        }else initBall();
         return;
     }
 
-    bool pierce = ball.isFireball;
-    for (auto& brick : bricks) {
-        if (!brick.active) continue;
-        if (checkBallBrickCollision(brick, pierce)) {
-            brick.health--;
-            if (brick.health <= 0) {
-                brick.active = false;
-                score += 10 * currentLevel;
-                spawnPerk(brick.x + BRICK_WIDTH / 2.0f, brick.y + BRICK_HEIGHT / 2.0f, brick.perk);
-            } else {
-                brick.r *= 0.75f; brick.g *= 0.75f; brick.b *= 0.75f;
-                score += 5;
-            }
-            if (!pierce) break;
+    // Brick collision
+    bool pierce=ball.isFireball;
+    for(auto& bk:bricks){
+        if(!bk.active) continue;
+        if(ballBrickCollide(bk,pierce)){
+            playSound(SND_BRICK);
+            bk.health--;
+            if(bk.health<=0){
+                bk.active=false;
+                score+=10*currentLevel;
+                spawnPerk(bk.x+BRICK_WIDTH/2,bk.y+BRICK_HEIGHT/2,bk.perk);
+            }else{bk.r*=.75f;bk.g*=.75f;bk.b*=.75f;score+=5;}
+            if(!pierce) break;
         }
     }
 
-    int activeBricks = 0;
-    for (auto& brick : bricks) if (brick.active) activeBricks++;
-    if (activeBricks == 0) {
-        if (currentLevel < MAX_LEVELS) {
-            score += 100 * currentLevel;
-            gameState = WIN;
-        } else {
-            gameState = WIN;
+    // Check win
+    int alive=0; for(auto&bk:bricks) if(bk.active) alive++;
+    if(alive==0){
+        score+=100*currentLevel;
+        if(currentLevel>=MAX_LEVELS){
+            addHighScore(score,gameTime,currentLevel);
+            playSound(SND_WIN);
+            gameStarted=false;
         }
+        gameState=WIN;
+        return;
     }
 
-    for (auto& p : perks) {
-        if (!p.active) continue;
-        p.y += p.dy;
-        if (p.y <= PADDLE_Y + PADDLE_HEIGHT && p.y >= PADDLE_Y - PERK_HEIGHT &&
-            p.x + PERK_WIDTH >= paddle.x && p.x <= paddle.x + paddle.width) {
-            p.active = false;
-            applyPerk(p.type);
+    // Perks fall
+    for(auto&p:perks){
+        if(!p.active) continue;
+        p.y+=p.dy;
+        if(p.y<=PADDLE_Y+PADDLE_HEIGHT && p.y>=PADDLE_Y-PERK_HEIGHT &&
+           p.x+PERK_WIDTH>=paddle.x && p.x<=paddle.x+paddle.width){
+            p.active=false; applyPerk(p.type);
         }
-        if (p.y < -PERK_HEIGHT) p.active = false;
+        if(p.y<-PERK_HEIGHT) p.active=false;
     }
 
-    for (auto& blt : bullets) {
-        if (!blt.active) continue;
-        blt.y += BULLET_SPEED;
-        if (blt.y > WINDOW_HEIGHT) { blt.active = false; continue; }
-        for (auto& brick : bricks) {
-            if (!brick.active) continue;
-            if (checkBulletBrickCollision(blt, brick)) {
-                blt.active = false;
-                brick.health--;
-                if (brick.health <= 0) {
-                    brick.active = false;
-                    score += 8 * currentLevel;
-                    spawnPerk(brick.x + BRICK_WIDTH / 2.0f, brick.y + BRICK_HEIGHT / 2.0f, brick.perk);
-                } else {
-                    brick.r *= 0.75f; brick.g *= 0.75f; brick.b *= 0.75f;
-                }
+    // Bullets
+    for(auto&blt:bullets){
+        if(!blt.active) continue;
+        blt.y+=BULLET_SPEED;
+        if(blt.y>WINDOW_HEIGHT){blt.active=false;continue;}
+        for(auto&bk:bricks){
+            if(!bk.active) continue;
+            if(bulletBrickCollide(blt,bk)){
+                blt.active=false; bk.health--;
+                if(bk.health<=0){
+                    bk.active=false; score+=8*currentLevel;
+                    spawnPerk(bk.x+BRICK_WIDTH/2,bk.y+BRICK_HEIGHT/2,bk.perk);
+                }else{bk.r*=.75f;bk.g*=.75f;bk.b*=.75f;}
                 break;
             }
         }
     }
 }
 
-void drawBackground() {
+// ==================== DRAW ====================
+void drawBackground(){
     glBegin(GL_QUADS);
-    glColor3f(0.0f, 0.0f, 0.15f); glVertex2f(0, 0); glVertex2f(WINDOW_WIDTH, 0);
-    glColor3f(0.0f, 0.0f, 0.3f);  glVertex2f(WINDOW_WIDTH, WINDOW_HEIGHT); glVertex2f(0, WINDOW_HEIGHT);
+    glColor3f(0,.0f,.15f); glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
+    glColor3f(0,.0f,.30f); glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT); glVertex2f(0,WINDOW_HEIGHT);
     glEnd();
 }
 
-void drawPaddle() {
-    float px = paddle.x, py = paddle.y, pw = paddle.width, ph = PADDLE_HEIGHT;
-
-    float pr = 0.3f, pg = 0.6f, pb = 1.0f;
-    if (shootActive)         { pr = 1.0f; pg = 1.0f; pb = 0.0f; }
-    if (smallerPaddleActive) { pr = 1.0f; pg = 0.2f; pb = 0.5f; }
-    if (widerPaddleActive)   { pr = 0.0f; pg = 0.8f; pb = 1.0f; }
-
-    glPointSize(1.0f);
-    drawBresenhamRect(px, py, pw, ph, pr, pg, pb);
-
-    float hr = std::min(pr + 0.4f, 1.0f);
-    float hg = std::min(pg + 0.3f, 1.0f);
-    glColor3f(hr, hg, 1.0f);
-    drawBresenhamRect(px + 2, py + ph - 4, pw - 4, 3, hr, hg, 1.0f);
-
-    drawBresenhamRectOutline(px, py, pw, ph, 1.0f, 1.0f, 1.0f);
-
-    if (shootActive) {
-        drawBresenhamRect(px + 2, py + ph, 8, 6, 1.0f, 0.8f, 0.0f);
-        drawBresenhamRect(px + pw - 10, py + ph, 8, 6, 1.0f, 0.8f, 0.0f);
+void drawPaddle(){
+    float px=paddle.x,py=paddle.y,pw=paddle.width,ph=PADDLE_HEIGHT;
+    float pr=.3f,pg=.6f,pb=1;
+    if(shootActive)        {pr=1;pg=1;pb=0;}
+    if(smallerPaddleActive){pr=1;pg=.2f;pb=.5f;}
+    if(widerPaddleActive)  {pr=0;pg=.8f;pb=1;}
+    glPointSize(1);
+    bRect(px,py,pw,ph,pr,pg,pb);
+    // highlight strip
+    float hr=std::min(pr+.4f,1.f),hg=std::min(pg+.3f,1.f);
+    bRect(px+2,py+ph-4,pw-4,3,hr,hg,1);
+    bRectOut(px,py,pw,ph,1,1,1);
+    if(shootActive){
+        bRect(px+2,py+ph,8,6,1,.8f,0);
+        bRect(px+pw-10,py+ph,8,6,1,.8f,0);
     }
 }
 
-void drawBall() {
-    if (!ball.active) return;
-
-    int bx = (int)ball.x;
-    int by = (int)ball.y;
-    int br = (int)BALL_RADIUS;
-
-    glPointSize(1.0f);
-
-    if (ball.isFireball) {
-        glColor3f(1.0f, 0.3f, 0.0f);
-        midpointCircleFilled(bx, by, br + 5);
-
-        glColor3f(1.0f, 0.6f, 0.0f);
-        midpointCircleFilled(bx, by, br + 3);
-
-        glColor3f(1.0f, 1.0f, 0.3f);
-        midpointCircleFilled(bx, by, br);
-    } else {
-        glColor3f(0.0f, 0.0f, 0.0f);
-        midpointCircleFilled(bx + 2, by - 2, br);
-
-        glColor3f(1.0f, 1.0f, 1.0f);
-        midpointCircleFilled(bx, by, br);
-
-        glColor3f(0.9f, 0.9f, 1.0f);
-        midpointCircleFilled(bx - 3, by + 3, (int)(BALL_RADIUS * 0.3f));
+void drawBall(){
+    if(!ball.active) return;
+    int bx=(int)ball.x,by=(int)ball.y,br=(int)BALL_RADIUS;
+    glPointSize(1);
+    if(ball.isFireball){
+        glColor3f(1,.3f,0);   mcFill(bx,by,br+5);
+        glColor3f(1,.6f,0);   mcFill(bx,by,br+3);
+        glColor3f(1,1,.3f);   mcFill(bx,by,br);
+    }else{
+        glColor3f(0,0,0);     mcFill(bx+2,by-2,br);
+        glColor3f(1,1,1);     mcFill(bx,by,br);
+        glColor3f(.9f,.9f,1); mcFill(bx-3,by+3,(int)(BALL_RADIUS*.3f));
     }
 }
 
-void drawBricks() {
-    for (auto& brick : bricks) {
-        if (!brick.active) continue;
-
-        if (brick.isWall) {
-            drawRect(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, brick.r, brick.g, brick.b);
-            drawRect(brick.x, brick.y + BRICK_HEIGHT / 2 - 1, BRICK_WIDTH, 2, 0.25f, 0.15f, 0.1f);
-            int brickIndex = (int)((brick.y - BRICK_START_Y) / -(BRICK_HEIGHT + BRICK_PADDING));
-            float vertX = (brickIndex % 2 == 0) ? brick.x + BRICK_WIDTH * 0.5f : brick.x + BRICK_WIDTH * 0.25f;
-            drawRect(vertX, brick.y, 2, BRICK_HEIGHT / 2, 0.25f, 0.15f, 0.1f);
-            drawRect(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, 0.1f, 0.05f, 0.0f, false);
-            for (int h = 0; h < brick.health && h < 4; h++) {
-                drawCircle(brick.x + 8 + h * 10, brick.y + BRICK_HEIGHT / 2, 3, 1.0f, 1.0f, 0.0f);
-            }
-        } else {
-            drawRect(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, brick.r, brick.g, brick.b);
-            drawRect(brick.x + 1, brick.y + BRICK_HEIGHT - 4, BRICK_WIDTH - 2, 3,
-                std::min(brick.r + 0.3f, 1.0f), std::min(brick.g + 0.3f, 1.0f), std::min(brick.b + 0.3f, 1.0f));
-            drawRect(brick.x, brick.y, BRICK_WIDTH, BRICK_HEIGHT, 0.0f, 0.0f, 0.0f, false);
-            if (brick.perk != PERK_NONE) {
-                float cx = brick.x + BRICK_WIDTH / 2.0f, cy = brick.y + BRICK_HEIGHT / 2.0f;
-                if      (brick.perk == PERK_EXTRA_LIFE)     drawCircle(cx, cy, 4, 0.0f, 1.0f, 0.0f);
-                else if (brick.perk == PERK_FASTER_BALL)    drawCircle(cx, cy, 4, 1.0f, 0.3f, 0.0f);
-                else if (brick.perk == PERK_WIDER_PADDLE)   drawCircle(cx, cy, 4, 0.0f, 0.5f, 1.0f);
-                else if (brick.perk == PERK_FIREBALL)       drawCircle(cx, cy, 4, 1.0f, 0.6f, 0.0f);
-                else if (brick.perk == PERK_DEATH)          drawCircle(cx, cy, 4, 0.8f, 0.0f, 0.8f);
-                else if (brick.perk == PERK_SMALLER_PADDLE) drawCircle(cx, cy, 4, 1.0f, 0.0f, 0.5f);
-                else if (brick.perk == PERK_SHOOT)          drawCircle(cx, cy, 4, 1.0f, 1.0f, 0.0f);
+void drawBricks(){
+    for(auto&bk:bricks){
+        if(!bk.active) continue;
+        if(bk.isWall){
+            drawRect(bk.x,bk.y,BRICK_WIDTH,BRICK_HEIGHT,bk.r,bk.g,bk.b);
+            drawRect(bk.x,bk.y+BRICK_HEIGHT/2-1,BRICK_WIDTH,2,.25f,.15f,.1f);
+            drawRect(bk.x,bk.y,BRICK_WIDTH,BRICK_HEIGHT,.1f,.05f,0,false);
+            for(int h=0;h<bk.health&&h<4;h++)
+                drawCircle(bk.x+8+h*10,bk.y+BRICK_HEIGHT/2,3,1,1,0);
+        }else{
+            drawRect(bk.x,bk.y,BRICK_WIDTH,BRICK_HEIGHT,bk.r,bk.g,bk.b);
+            drawRect(bk.x+1,bk.y+BRICK_HEIGHT-4,BRICK_WIDTH-2,3,
+                std::min(bk.r+.3f,1.f),std::min(bk.g+.3f,1.f),std::min(bk.b+.3f,1.f));
+            drawRect(bk.x,bk.y,BRICK_WIDTH,BRICK_HEIGHT,0,0,0,false);
+            if(bk.perk!=PERK_NONE){
+                float cx=bk.x+BRICK_WIDTH/2,cy=bk.y+BRICK_HEIGHT/2;
+                switch(bk.perk){
+                    case PERK_EXTRA_LIFE:     drawCircle(cx,cy,4,0,1,0);break;
+                    case PERK_FASTER_BALL:    drawCircle(cx,cy,4,1,.3f,0);break;
+                    case PERK_WIDER_PADDLE:   drawCircle(cx,cy,4,0,.5f,1);break;
+                    case PERK_FIREBALL:       drawCircle(cx,cy,4,1,.6f,0);break;
+                    case PERK_DEATH:          drawCircle(cx,cy,4,.8f,0,.8f);break;
+                    case PERK_SMALLER_PADDLE: drawCircle(cx,cy,4,1,0,.5f);break;
+                    case PERK_SHOOT:          drawCircle(cx,cy,4,1,1,0);break;
+                    default:break;
+                }
             }
         }
     }
 }
 
-void drawPerks() {
-    for (auto& p : perks) {
-        if (!p.active) continue;
-        drawRect(p.x - PERK_WIDTH / 2, p.y - PERK_HEIGHT / 2, PERK_WIDTH, PERK_HEIGHT, p.r, p.g, p.b);
-        drawRect(p.x - PERK_WIDTH / 2, p.y - PERK_HEIGHT / 2, PERK_WIDTH, PERK_HEIGHT, 1.0f, 1.0f, 1.0f, false);
-        std::string label = "?";
-        if      (p.type == PERK_EXTRA_LIFE)     label = "L";
-        else if (p.type == PERK_FASTER_BALL)    label = "F";
-        else if (p.type == PERK_WIDER_PADDLE)   label = "W";
-        else if (p.type == PERK_FIREBALL)       label = "B";
-        else if (p.type == PERK_DEATH)          label = "X";
-        else if (p.type == PERK_SMALLER_PADDLE) label = "S";
-        else if (p.type == PERK_SHOOT)          label = "G";
-        drawText(p.x - 4, p.y - 6, label, 1.0f, 1.0f, 1.0f, GLUT_BITMAP_HELVETICA_12);
+void drawPerks(){
+    for(auto&p:perks){
+        if(!p.active) continue;
+        drawRect(p.x-PERK_WIDTH/2,p.y-PERK_HEIGHT/2,PERK_WIDTH,PERK_HEIGHT,p.r,p.g,p.b);
+        drawRect(p.x-PERK_WIDTH/2,p.y-PERK_HEIGHT/2,PERK_WIDTH,PERK_HEIGHT,1,1,1,false);
+        std::string lbl="?";
+        switch(p.type){
+            case PERK_EXTRA_LIFE:lbl="L";break; case PERK_FASTER_BALL:lbl="F";break;
+            case PERK_WIDER_PADDLE:lbl="W";break; case PERK_FIREBALL:lbl="B";break;
+            case PERK_DEATH:lbl="X";break; case PERK_SMALLER_PADDLE:lbl="S";break;
+            case PERK_SHOOT:lbl="G";break; default:break;
+        }
+        drawText(p.x-4,p.y-6,lbl,1,1,1,GLUT_BITMAP_HELVETICA_12);
     }
 }
 
-void drawBullets() {
-    for (auto& blt : bullets) {
-        if (!blt.active) continue;
-        drawRect(blt.x - BULLET_WIDTH / 2, blt.y, BULLET_WIDTH, BULLET_HEIGHT, 1.0f, 1.0f, 0.0f);
-        drawRect(blt.x - BULLET_WIDTH / 2, blt.y + BULLET_HEIGHT - 3, BULLET_WIDTH, 3, 1.0f, 0.5f, 0.0f);
+void drawBullets(){
+    for(auto&blt:bullets){
+        if(!blt.active) continue;
+        drawRect(blt.x-BULLET_WIDTH/2,blt.y,BULLET_WIDTH,BULLET_HEIGHT,1,1,0);
+        drawRect(blt.x-BULLET_WIDTH/2,blt.y+BULLET_HEIGHT-3,BULLET_WIDTH,3,1,.5f,0);
     }
 }
 
-void drawHUD() {
-    drawRect(0, WINDOW_HEIGHT - 40, WINDOW_WIDTH, 40, 0.0f, 0.0f, 0.2f);
-    drawRect(0, WINDOW_HEIGHT - 41, WINDOW_WIDTH, 2, 0.3f, 0.6f, 1.0f);
-    drawText(10, WINDOW_HEIGHT - 25, "Lives:", 0.8f, 0.8f, 1.0f);
-    for (int i = 0; i < lives && i < 7; i++)
-        drawCircle(80 + i * 22, WINDOW_HEIGHT - 20, 8, 1.0f, 0.3f, 0.3f);
-    drawText(200, WINDOW_HEIGHT - 25, "Score: " + intToString(score), 1.0f, 1.0f, 0.0f);
-    drawText(360, WINDOW_HEIGHT - 25, "Time: " + floatToString(gameTime) + "s", 0.5f, 1.0f, 0.5f);
-    drawText(520, WINDOW_HEIGHT - 25, "Spd: " + floatToString(ball.speed, 1), 1.0f, 0.5f, 0.0f);
-    drawText(640, WINDOW_HEIGHT - 25, "Lvl: " + intToString(currentLevel) + "/" + intToString(MAX_LEVELS), 0.8f, 0.8f, 1.0f);
+void drawHUD(){
+    drawRect(0,WINDOW_HEIGHT-40,WINDOW_WIDTH,40,0,0,.2f);
+    drawRect(0,WINDOW_HEIGHT-41,WINDOW_WIDTH,2,.3f,.6f,1);
+    drawText(10,WINDOW_HEIGHT-25,"Lives:",0.8f,0.8f,1);
+    for(int i=0;i<lives&&i<7;i++)
+        drawCircle(80+i*22,WINDOW_HEIGHT-20,8,1,.3f,.3f);
+    drawText(200,WINDOW_HEIGHT-25,"Score: "+iStr(score),1,1,0);
+    drawText(360,WINDOW_HEIGHT-25,"Time: "+fStr(gameTime)+"s",.5f,1,.5f);
+    drawText(510,WINDOW_HEIGHT-25,"Spd: "+fStr(ball.speed,1),1,.5f,0);
+    drawText(630,WINDOW_HEIGHT-25,"Lvl: "+iStr(currentLevel)+"/"+iStr(MAX_LEVELS),.8f,.8f,1);
 
-    int hintY = 10;
-    if (widerPaddleActive)
-        drawText(10, hintY, "WIDE:" + floatToString(widerPaddleTimer, 1) + "s", 0.0f, 0.8f, 1.0f, GLUT_BITMAP_HELVETICA_12);
-    if (smallerPaddleActive)
-        drawText(110, hintY, "SMALL:" + floatToString(smallerPaddleTimer, 1) + "s", 1.0f, 0.0f, 0.5f, GLUT_BITMAP_HELVETICA_12);
-    if (shootActive)
-        drawText(220, hintY, "GUN:" + floatToString(shootTimer, 1) + "s", 1.0f, 1.0f, 0.0f, GLUT_BITMAP_HELVETICA_12);
-    if (fireballActive)
-        drawText(330, hintY, "FIRE:" + floatToString(fireballTimer, 1) + "s", 1.0f, 0.5f, 0.0f, GLUT_BITMAP_HELVETICA_12);
-    drawText(460, hintY, "[L]Life [F]Fast [W]Wide [B]Fire [X]Death [S]Small [G]Gun",
-        0.5f, 0.5f, 0.5f, GLUT_BITMAP_HELVETICA_12);
+    // Sound indicator top-right
+    std::string st=soundEnabled?"SND:ON":"SND:OFF";
+    drawText(740,WINDOW_HEIGHT-25,st,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
+
+    int hy=10;
+    if(widerPaddleActive)   drawText(10, hy,"WIDE:" +fStr(widerPaddleTimer,1)+"s",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    if(smallerPaddleActive) drawText(110,hy,"SMALL:"+fStr(smallerPaddleTimer,1)+"s",1,0,.5f,GLUT_BITMAP_HELVETICA_12);
+    if(shootActive)         drawText(220,hy,"GUN:"  +fStr(shootTimer,1)+"s",1,1,0,GLUT_BITMAP_HELVETICA_12);
+    if(fireballActive)      drawText(330,hy,"FIRE:" +fStr(fireballTimer,1)+"s",1,.5f,0,GLUT_BITMAP_HELVETICA_12);
+    drawText(450,hy,"[L]Life [F]Fast [W]Wide [B]Fire [X]Death [S]Small [G]Gun",
+             .5f,.5f,.5f,GLUT_BITMAP_HELVETICA_12);
 }
 
-void drawPauseOverlay() {
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(0.0f, 0.0f, 0.0f, 0.65f);
+// ==================== PAUSE OVERLAY ====================
+void drawPauseOverlay(){
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0,0,0,.65f);
     glBegin(GL_QUADS);
-    glVertex2f(0, 0); glVertex2f(WINDOW_WIDTH, 0);
-    glVertex2f(WINDOW_WIDTH, WINDOW_HEIGHT); glVertex2f(0, WINDOW_HEIGHT);
-    glEnd();
-    glDisable(GL_BLEND);
+    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glEnd(); glDisable(GL_BLEND);
 
-    drawRect(260, 210, 280, 180, 0.0f, 0.0f, 0.25f);
-    drawRect(260, 210, 280, 180, 0.0f, 0.8f, 1.0f, false);
-    drawTextLarge(340, 365, "PAUSED", 1.0f, 1.0f, 0.0f);
+    drawRect(250,180,300,250,0,0,.25f);
+    drawRect(250,180,300,250,0,.8f,1,false);
+    drawTextL(328,398,"PAUSED",1,1,0);
 
-    std::vector<std::string> opts = { "RESUME", "MAIN MENU" };
-    for (int i = 0; i < (int)opts.size(); i++) {
-        float by2 = 310 - i * 55;
-        if (selectedPauseMenu == i) {
-            drawRect(285, by2 - 5, 230, 38, 0.0f, 0.4f, 0.8f);
-            drawRect(285, by2 - 5, 230, 38, 0.0f, 1.0f, 1.0f, false);
-            drawTextLarge(330, by2 + 8, opts[i], 1.0f, 1.0f, 1.0f);
-        } else {
-            drawRect(285, by2 - 5, 230, 38, 0.05f, 0.05f, 0.2f);
-            drawRect(285, by2 - 5, 230, 38, 0.3f, 0.3f, 0.6f, false);
-            drawTextLarge(330, by2 + 8, opts[i], 0.7f, 0.7f, 0.9f);
+    std::string sm=soundEnabled?"Sound: ON  (M)":"Sound: OFF (M)";
+    drawText(285,370,sm,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
+
+    const char* opts[]={"RESUME","MAIN MENU"};
+    for(int i=0;i<2;i++){
+        float by=318-i*62;
+        if(selectedPauseMenu==i){
+            drawRect(275,by-8,250,42,0,.4f,.8f);
+            drawRect(275,by-8,250,42,0,1,1,false);
+            drawTextL(318,by+7,opts[i],1,1,1);
+        }else{
+            drawRect(275,by-8,250,42,.05f,.05f,.2f);
+            drawRect(275,by-8,250,42,.3f,.3f,.6f,false);
+            drawTextL(318,by+7,opts[i],.7f,.7f,.9f);
         }
     }
-    drawText(280, 222, "UP/DOWN to select, ENTER to confirm", 0.5f, 0.5f, 0.7f, GLUT_BITMAP_HELVETICA_12);
+    drawText(265,192,"UP/DOWN: select   ENTER: confirm",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
-void drawMenu() {
+// ==================== MAIN MENU ====================
+void drawMenu(){
     drawBackground();
-    drawTextLarge(240, 500, "DX BALL - ADVANCED", 0.0f, 0.8f, 1.0f);
-    drawTextLarge(238, 498, "DX BALL - ADVANCED", 0.0f, 0.3f, 0.6f);
-    drawText(280, 460, "CSE 426 - Computer Graphics Lab", 0.7f, 0.7f, 0.7f, GLUT_BITMAP_HELVETICA_12);
-    drawText(260, 440, "Level System | Fireball | Gun | Death Item", 0.5f, 0.9f, 0.5f, GLUT_BITMAP_HELVETICA_12);
+    // decorative stars
+    srand(42);
+    for(int i=0;i<80;i++){
+        float sx=(float)(rand()%WINDOW_WIDTH),sy=(float)(rand()%WINDOW_HEIGHT);
+        float br2=(float)(rand()%100)/100.f;
+        drawCircle(sx,sy,1.5f,br2,br2,br2);
+    }
+    srand((unsigned)time(0));
 
-    std::vector<std::string> items = { "START GAME", "HOW TO PLAY", "EXIT" };
-    for (int i = 0; i < (int)items.size(); i++) {
-        float y = 360 - i * 65;
-        float bx = 270, by = y - 15, bw = 260, bh = 45;
-        if (selectedMenu == i) {
-            drawRect(bx, by, bw, bh, 0.0f, 0.4f, 0.8f);
-            drawRect(bx, by, bw, bh, 0.0f, 0.8f, 1.0f, false);
-            drawTextLarge(bx + 40, by + 12, items[i], 1.0f, 1.0f, 1.0f);
-        } else {
-            drawRect(bx, by, bw, bh, 0.05f, 0.05f, 0.2f);
-            drawRect(bx, by, bw, bh, 0.3f, 0.3f, 0.6f, false);
-            drawTextLarge(bx + 40, by + 12, items[i], 0.7f, 0.7f, 0.9f);
+    drawTextL(238,523,"DX BALL - ADVANCED",0,.3f,.6f);
+    drawTextL(235,526,"DX BALL - ADVANCED",0,.8f,1);
+    drawRect(100,512,600,2,0,.6f,1);
+    drawText(278,494,"CSE 426 - Computer Graphics Lab",.7f,.7f,.7f,GLUT_BITMAP_HELVETICA_12);
+
+    // Build menu items dynamically
+    std::vector<std::string> items;
+    if(gameStarted){
+        items={"RESUME GAME","NEW GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
+    }else{
+        items={"START GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
+    }
+    int n=(int)items.size();
+    // Clamp selection
+    if(selectedMenu>=n) selectedMenu=n-1;
+
+    for(int i=0;i<n;i++){
+        float y=430-(float)i*58;
+        float bx=265,by=y-15,bw=270,bh=44;
+        if(selectedMenu==i){
+            drawRect(bx,by,bw,bh,0,.4f,.8f);
+            drawRect(bx,by,bw,bh,0,.9f,1,false);
+            drawText(bx+10,by+15,">",0,1,1);
+            drawTextL(bx+28,by+11,items[i],1,1,1);
+        }else{
+            drawRect(bx,by,bw,bh,.05f,.05f,.2f);
+            drawRect(bx,by,bw,bh,.3f,.3f,.6f,false);
+            drawTextL(bx+28,by+11,items[i],.7f,.7f,.9f);
         }
     }
-    drawText(220, 60, "Use UP/DOWN arrows to navigate, ENTER to select", 0.5f, 0.5f, 0.7f, GLUT_BITMAP_HELVETICA_12);
+
+    std::string st=soundEnabled?"Sound: ON  (M to toggle)":"Sound: OFF (M to toggle)";
+    drawText(270,70,st,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
+    drawText(215,48,"UP/DOWN: navigate     ENTER: select",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
-void drawHelpScreen() {
+// ==================== HIGH SCORE SCREEN ====================
+void drawHighScoreScreen(){
     drawBackground();
-    drawTextLarge(270, 548, "HOW TO PLAY", 0.0f, 0.8f, 1.0f);
-    std::vector<std::string> lines = {
+    drawTextL(298,548,"HIGH SCORES",0,.3f,.6f);
+    drawTextL(295,550,"HIGH SCORES",0,.8f,1);
+    drawRect(100,535,600,2,0,.6f,1);
+
+    // Header row
+    drawRect(150,492,500,30,0,.1f,.3f);
+    drawRect(150,492,500,30,0,.5f,.8f,false);
+    drawText(178,503,"RANK", 0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    drawText(270,503,"SCORE",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    drawText(390,503,"TIME", 0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    drawText(505,503,"LEVEL",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+
+    if(highScores.empty()){
+        drawRect(150,370,500,90,0,.05f,.15f);
+        drawRect(150,370,500,90,0,.3f,.6f,false);
+        drawTextL(240,415,"No scores yet!",0.5f,0.5f,0.7f);
+        drawText(252,393,"Play a game first!",0.4f,0.4f,0.6f,GLUT_BITMAP_HELVETICA_12);
+    }else{
+        float rc[5][3]={{1,.84f,0},{.75f,.75f,.75f},{.8f,.5f,.2f},{.7f,.7f,1},{.7f,.7f,1}};
+        for(int i=0;i<(int)highScores.size();i++){
+            float ry=455-(float)i*50;
+            drawRect(150,ry-15,500,42,0.02f+i*.01f,0.08f,0.22f);
+            drawRect(150,ry-15,500,42,rc[i][0]*.3f,rc[i][1]*.3f,rc[i][2]*.3f,false);
+            drawCircle(185,ry+6,12,rc[i][0],rc[i][1],rc[i][2]);
+            drawText(180,ry+1,"#"+iStr(i+1),0,0,0,GLUT_BITMAP_HELVETICA_12);
+            drawText(255,ry,iStr(highScores[i].score),rc[i][0],rc[i][1],rc[i][2]);
+            drawText(375,ry,fStr(highScores[i].time,1)+"s",.8f,.9f,.8f);
+            drawText(505,ry,"Lvl "+iStr(highScores[i].level),.8f,.8f,1);
+        }
+    }
+
+    drawRect(100,182,600,2,0,.6f,1);
+    drawRect(195,148,410,34,0,.05f,.2f);
+    drawRect(195,148,410,34,0,.4f,.8f,false);
+    drawText(248,160,"Press ESC to return to Menu",.6f,.8f,1,GLUT_BITMAP_HELVETICA_12);
+}
+
+// ==================== HELP SCREEN ====================
+void drawHelpScreen(){
+    drawBackground();
+    drawTextL(268,548,"HOW TO PLAY",0,.8f,1);
+    drawRect(100,535,600,2,0,.6f,1);
+
+    const char* lines[]={
         "CONTROLS:",
-        "  LEFT/RIGHT Arrow : Move Paddle",
-        "  Mouse Move       : Move Paddle",
-        "  SPACE / L-Click  : Launch Ball",
-        "  P                : Pause / Resume",
-        "  ESC              : Menu (in-game)",
+        "  LEFT / RIGHT Arrow  :  Move Paddle",
+        "  Mouse Move          :  Move Paddle",
+        "  SPACE / Left-Click  :  Launch Ball  /  Fire Gun",
+        "  P                   :  Pause / Resume",
+        "  M                   :  Toggle Sound On / Off",
+        "  ESC                 :  Pause Menu (in-game)",
         "",
         "GAME:",
-        "  Break ALL bricks to advance levels!",
-        "  3 Levels total - harder each level",
-        "  Gray bricks = Wall (needs more hits)",
+        "  Break ALL bricks to advance level  (3 levels total)",
+        "  Gray/Brown bricks = Wall Brick (needs more hits)",
+        "  Score increases per brick partial hit and destroy",
         "",
-        "POWER-UPS (catch falling items):",
-        "  [L] GREEN    = Extra Life",
-        "  [F] ORANGE   = Faster Ball",
-        "  [W] BLUE     = Wide Paddle (10s)",
-        "  [B] FIRE     = Fireball - pierces bricks (8s)",
-        "  [X] PURPLE   = DEATH - lose a life instantly!",
-        "  [S] PINK     = Smaller Paddle (8s)",
-        "  [G] YELLOW   = Gun - shoot bullets (12s)",
-        "",
-        "  SPACE also fires gun when active"
+        "POWER-UPS  (catch falling items with paddle):",
+        "  [L] GREEN   =  Extra Life (+1 life)",
+        "  [F] ORANGE  =  Faster Ball (speed +1.5)",
+        "  [W] BLUE    =  Wide Paddle  (10 seconds)",
+        "  [B] FIRE    =  Fireball - pierces bricks!  (8s)",
+        "  [X] PURPLE  =  DEATH - lose a life instantly!",
+        "  [S] PINK    =  Smaller Paddle  (8 seconds)",
+        "  [G] YELLOW  =  Gun - shoot bullets!  (12 seconds)",
     };
-    for (int i = 0; i < (int)lines.size(); i++)
-        drawText(130, 512 - i * 22, lines[i], 0.9f, 0.9f, 0.9f);
-    drawText(240, 28, "Press ESC to go back", 0.5f, 0.7f, 1.0f, GLUT_BITMAP_HELVETICA_12);
+    int n=sizeof(lines)/sizeof(lines[0]);
+    for(int i=0;i<n;i++)
+        drawText(125,510-(float)i*22,lines[i],.9f,.9f,.9f);
+
+    drawRect(195,25,410,32,0,.05f,.2f);
+    drawRect(195,25,410,32,0,.4f,.8f,false);
+    drawText(238,37,"Press ESC to return to Menu",.5f,.7f,1,GLUT_BITMAP_HELVETICA_12);
 }
 
-void drawGameOver() {
+// ==================== GAME OVER ====================
+void drawGameOver(){
     drawBackground(); drawBricks(); drawHUD();
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(0.0f, 0.0f, 0.0f, 0.75f);
-    glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(WINDOW_WIDTH, 0);
-    glVertex2f(WINDOW_WIDTH, WINDOW_HEIGHT); glVertex2f(0, WINDOW_HEIGHT); glEnd();
-    glDisable(GL_BLEND);
-    drawRect(190, 190, 420, 220, 0.12f, 0.0f, 0.0f);
-    drawRect(190, 190, 420, 220, 1.0f, 0.0f, 0.0f, false);
-    drawTextLarge(275, 368, "GAME OVER", 1.0f, 0.2f, 0.2f);
-    drawText(270, 328, "Final Score: " + intToString(score), 1.0f, 1.0f, 0.5f);
-    drawText(270, 298, "Level Reached: " + intToString(currentLevel), 0.8f, 0.8f, 1.0f);
-    drawText(270, 268, "Time: " + floatToString(gameTime) + " seconds", 0.8f, 0.8f, 0.8f);
-    drawText(250, 238, "Press ENTER to Play Again", 0.9f, 0.9f, 0.9f);
-    drawText(260, 213, "Press ESC for Main Menu", 0.7f, 0.7f, 0.7f);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0,0,0,.75f);
+    glBegin(GL_QUADS);
+    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glEnd(); glDisable(GL_BLEND);
+
+    drawRect(165,182,470,240,.12f,0,0);
+    drawRect(165,182,470,240,1,0,0,false);
+    drawTextL(260,385,"GAME  OVER",1,.2f,.2f);
+    drawText(235,350,"Final Score:   "+iStr(score),1,1,.5f);
+    drawText(235,322,"Level Reached: "+iStr(currentLevel),.8f,.8f,1);
+    drawText(235,294,"Time Played:   "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
+
+    // New high score?
+    if(!highScores.empty()&&highScores[0].score==score)
+        drawText(268,264,"*** NEW HIGH SCORE! ***",1,.84f,0);
+
+    drawText(230,234,"Press ENTER to Play Again",.9f,.9f,.9f);
+    drawText(245,208,"Press ESC  for Main Menu",.7f,.7f,.7f);
 }
 
-void drawWin() {
+// ==================== WIN ====================
+void drawWin(){
     drawBackground();
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glColor4f(0.0f, 0.05f, 0.0f, 0.5f);
-    glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(WINDOW_WIDTH, 0);
-    glVertex2f(WINDOW_WIDTH, WINDOW_HEIGHT); glVertex2f(0, WINDOW_HEIGHT); glEnd();
-    glDisable(GL_BLEND);
-    drawRect(170, 170, 460, 260, 0.0f, 0.1f, 0.05f);
-    drawRect(170, 170, 460, 260, 0.0f, 1.0f, 0.5f, false);
-    if (currentLevel > MAX_LEVELS) {
-        drawTextLarge(240, 390, "ALL LEVELS COMPLETE!", 0.0f, 1.0f, 0.4f);
-        drawText(240, 355, "You are a true DX Ball Master!", 0.9f, 1.0f, 0.9f);
-    } else {
-        drawTextLarge(255, 390, "LEVEL " + intToString(currentLevel - 1) + " CLEAR!", 0.0f, 1.0f, 0.4f);
-        drawText(240, 355, "Level " + intToString(currentLevel) + " Awaits!", 0.9f, 1.0f, 0.9f);
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0,.05f,0,.5f);
+    glBegin(GL_QUADS);
+    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glEnd(); glDisable(GL_BLEND);
+
+    drawRect(155,172,490,275,0,.1f,.05f);
+    drawRect(155,172,490,275,0,1,.5f,false);
+
+    if(currentLevel>MAX_LEVELS){
+        drawTextL(215,405,"ALL LEVELS COMPLETE!",0,1,.4f);
+        drawText(225,372,"You are a true DX Ball Master!",.9f,1,.9f);
+    }else{
+        drawTextL(235,405,"LEVEL "+iStr(currentLevel-1)+" CLEAR!",0,1,.4f);
+        drawText(225,372,"Get ready for Level "+iStr(currentLevel)+"!",.9f,1,.9f);
     }
-    drawText(250, 322, "Score: " + intToString(score), 1.0f, 1.0f, 0.5f);
-    drawText(250, 292, "Time: " + floatToString(gameTime) + " seconds", 0.8f, 0.8f, 0.8f);
-    if (currentLevel <= MAX_LEVELS)
-        drawText(230, 258, "Press ENTER for Next Level", 0.0f, 1.0f, 0.5f);
+    drawText(235,338,"Score: "+iStr(score),1,1,.5f);
+    drawText(235,308,"Time:  "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
+    drawText(235,278,"Level: "+iStr(std::min(currentLevel-1,MAX_LEVELS))+"/"+iStr(MAX_LEVELS),.8f,.8f,1);
+
+    if(currentLevel<=MAX_LEVELS)
+        drawText(218,244,"Press ENTER for Next Level",0,1,.5f);
     else
-        drawText(230, 258, "Press ENTER to Play Again", 0.0f, 1.0f, 0.5f);
-    drawText(250, 228, "Press ESC for Main Menu", 0.7f, 0.7f, 0.7f);
+        drawText(218,244,"Press ENTER to Play Again",0,1,.5f);
+    drawText(238,214,"Press ESC  for Main Menu",.7f,.7f,.7f);
 }
 
-void drawFlashOverlay() {
-    if (flashTimer <= 0) return;
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    float alpha = flashTimer * 1.5f; if (alpha > 0.6f) alpha = 0.6f;
-    glColor4f(flashR, flashG, flashB, alpha);
-    glBegin(GL_QUADS); glVertex2f(0, 0); glVertex2f(WINDOW_WIDTH, 0);
-    glVertex2f(WINDOW_WIDTH, WINDOW_HEIGHT); glVertex2f(0, WINDOW_HEIGHT); glEnd();
-    glDisable(GL_BLEND);
+// ==================== FLASH ====================
+void drawFlash(){
+    if(flashTimer<=0) return;
+    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
+    float a=flashTimer*1.5f; if(a>.6f) a=.6f;
+    glColor4f(flashR,flashG,flashB,a);
+    glBegin(GL_QUADS);
+    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glEnd(); glDisable(GL_BLEND);
 }
 
-void display() {
+// ==================== DISPLAY ====================
+void display(){
     glClear(GL_COLOR_BUFFER_BIT);
     glLoadIdentity();
-
-    switch (gameState) {
-    case MENU:
-        drawMenu();
-        break;
-    case HELP:
-        drawHelpScreen();
-        break;
-    case PLAYING:
-        drawBackground();
-        drawBricks();
-        drawPerks();
-        drawBullets();
-        drawPaddle();
-        drawBall();
-        drawHUD();
-        drawFlashOverlay();
-        if (ballOnPaddle)
-            drawText(280, 200, "Press SPACE or Click to launch!", 1.0f, 1.0f, 0.0f);
-        if (shootActive && ballOnPaddle)
-            drawText(280, 175, "SPACE also fires gun!", 1.0f, 0.8f, 0.0f);
-        break;
-    case PAUSED:
-        drawBackground();
-        drawBricks();
-        drawPerks();
-        drawBullets();
-        drawPaddle();
-        drawBall();
-        drawHUD();
-        drawPauseOverlay();
-        break;
-    case GAME_OVER:
-        drawGameOver();
-        break;
-    case WIN:
-        drawWin();
-        break;
+    switch(gameState){
+        case MENU:       drawMenu();            break;
+        case HELP:       drawHelpScreen();      break;
+        case HIGH_SCORE: drawHighScoreScreen(); break;
+        case PLAYING:
+            drawBackground();
+            drawBricks(); drawPerks(); drawBullets();
+            drawPaddle(); drawBall(); drawHUD();
+            drawFlash();
+            if(ballOnPaddle)
+                drawText(262,200,"Press SPACE or Click to launch!",1,1,0);
+            break;
+        case PAUSED:
+            drawBackground();
+            drawBricks(); drawPerks(); drawBullets();
+            drawPaddle(); drawBall(); drawHUD();
+            drawPauseOverlay();
+            break;
+        case GAME_OVER: drawGameOver(); break;
+        case WIN:       drawWin();      break;
     }
     glutSwapBuffers();
 }
 
-void reshape(int w, int h) {
-    glViewport(0, 0, w, h);
+void reshape(int w,int h){
+    glViewport(0,0,w,h);
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
-    gluOrtho2D(0, WINDOW_WIDTH, 0, WINDOW_HEIGHT);
+    gluOrtho2D(0,WINDOW_WIDTH,0,WINDOW_HEIGHT);
     glMatrixMode(GL_MODELVIEW); glLoadIdentity();
 }
 
-void timer(int value) {
-    float dt = 1.0f / 60.0f;
-    updateGame(dt);
+void timerCB(int){
+    updateGame(1.0f/60.0f);
     glutPostRedisplay();
-    glutTimerFunc(16, timer, 0);
+    glutTimerFunc(16,timerCB,0);
 }
 
-void fireBullet() {
-    if (!shootActive) return;
-    if (bulletCooldown > 0) return;
-    Bullet b1; b1.x = paddle.x + 5; b1.y = paddle.y + PADDLE_HEIGHT + 1; b1.active = true;
-    Bullet b2; b2.x = paddle.x + paddle.width - 5; b2.y = b1.y; b2.active = true;
-    bullets.push_back(b1);
-    bullets.push_back(b2);
-    bulletCooldown = 0.35f;
+// ==================== INPUT ====================
+void fireBullet(){
+    if(!shootActive||bulletCooldown>0) return;
+    Bullet b1; b1.x=paddle.x+5;              b1.y=paddle.y+PADDLE_HEIGHT+1; b1.active=true;
+    Bullet b2; b2.x=paddle.x+paddle.width-5; b2.y=b1.y;                     b2.active=true;
+    bullets.push_back(b1); bullets.push_back(b2);
+    bulletCooldown=0.35f;
+    playSound(SND_BULLET);
 }
 
-void keyboard(unsigned char key, int x, int y) {
-    if (gameState == HELP) {
-        if (key == 27) gameState = MENU;
+void launchBall(){
+    ballOnPaddle=false;
+    ball.dy= fabsf(ball.speed*0.7f);
+    ball.dx= ball.speed*0.7f;
+    playSound(SND_LAUNCH);
+}
+
+// Return number of items in current menu
+int menuItemCount(){ return gameStarted?5:4; }
+
+// Map selectedMenu index to action when gameStarted==true
+void menuAction(int idx){
+    if(gameStarted){
+        // RESUME, NEW GAME, HIGH SCORES, HOW TO PLAY, EXIT
+        if(idx==0){ gameState=PLAYING; }
+        else if(idx==1){ gameStarted=false; initGame(); }
+        else if(idx==2){ gameState=HIGH_SCORE; }
+        else if(idx==3){ gameState=HELP; }
+        else if(idx==4){ exit(0); }
+    }else{
+        // START GAME, HIGH SCORES, HOW TO PLAY, EXIT
+        if(idx==0){ initGame(); }
+        else if(idx==1){ gameState=HIGH_SCORE; }
+        else if(idx==2){ gameState=HELP; }
+        else if(idx==3){ exit(0); }
+    }
+}
+
+void keyboard(unsigned char key,int,int){
+    // M = toggle sound anywhere
+    if(key=='m'||key=='M'){
+        soundEnabled=!soundEnabled;
+        if(soundEnabled) playSound(SND_PERK);
         glutPostRedisplay(); return;
     }
-    switch (gameState) {
-    case MENU:
-        if (key == 13) {
-            if (selectedMenu == 0) initGame();
-            else if (selectedMenu == 1) gameState = HELP;
-            else if (selectedMenu == 2) exit(0);
-        }
-        break;
-    case PLAYING:
-        if (key == ' ') {
-            if (ballOnPaddle) {
-                ballOnPaddle = false;
-                ball.dy = fabs(ball.speed * 0.7f);
-                ball.dx = ball.speed * 0.7f;
-            } else if (shootActive) {
-                fireBullet();
+
+    if(gameState==HELP||gameState==HIGH_SCORE){
+        if(key==27) gameState=MENU;
+        glutPostRedisplay(); return;
+    }
+
+    switch(gameState){
+        case MENU:
+            if(key==13) menuAction(selectedMenu);
+            break;
+
+        case PLAYING:
+            if(key==' '){
+                if(ballOnPaddle) launchBall();
+                else if(shootActive) fireBullet();
             }
-        }
-        if (key == 'p' || key == 'P') {
-            gameState = PAUSED;
-            selectedPauseMenu = 0;
-        }
-        if (key == 27) {
-            gameState = PAUSED;
-            selectedPauseMenu = 1;
-        }
-        break;
-    case PAUSED:
-        if (key == 'p' || key == 'P') {
-            gameState = PLAYING;
-        }
-        if (key == 13) {
-            if (selectedPauseMenu == 0) gameState = PLAYING;
-            else if (selectedPauseMenu == 1) { gameState = MENU; selectedMenu = 0; }
-        }
-        if (key == 27) {
-            gameState = PLAYING;
-        }
-        break;
-    case GAME_OVER:
-        if (key == 13) initGame();
-        if (key == 27) { gameState = MENU; selectedMenu = 0; }
-        break;
-    case WIN:
-        if (key == 13) {
-            if (currentLevel <= MAX_LEVELS) nextLevel();
-            else initGame();
-        }
-        if (key == 27) { gameState = MENU; selectedMenu = 0; }
-        break;
-    default: break;
+            if(key=='p'||key=='P'){ gameState=PAUSED; selectedPauseMenu=0; }
+            if(key==27)           { gameState=PAUSED; selectedPauseMenu=0; }
+            break;
+
+        case PAUSED:
+            if(key=='p'||key=='P') gameState=PLAYING;
+            if(key==13){
+                if(selectedPauseMenu==0) gameState=PLAYING;
+                else{ gameState=MENU; selectedMenu=0; }
+            }
+            if(key==27) gameState=PLAYING;
+            break;
+
+        case GAME_OVER:
+            if(key==13){ selectedMenu=0; initGame(); }
+            if(key==27){ gameState=MENU; selectedMenu=0; }
+            break;
+
+        case WIN:
+            if(key==13){
+                if(currentLevel<=MAX_LEVELS) nextLevel();
+                else{ selectedMenu=0; initGame(); }
+            }
+            if(key==27){ gameState=MENU; selectedMenu=0; }
+            break;
+
+        default: break;
     }
     glutPostRedisplay();
 }
 
-void specialKeys(int key, int x, int y) {
-    if (gameState == MENU || gameState == HELP) {
-        if (key == GLUT_KEY_UP)   selectedMenu = (selectedMenu - 1 + 3) % 3;
-        if (key == GLUT_KEY_DOWN) selectedMenu = (selectedMenu + 1) % 3;
+void specialKeys(int key,int,int){
+    if(gameState==MENU){
+        int n=menuItemCount();
+        if(key==GLUT_KEY_UP)   selectedMenu=(selectedMenu-1+n)%n;
+        if(key==GLUT_KEY_DOWN) selectedMenu=(selectedMenu+1)%n;
         glutPostRedisplay(); return;
     }
-    if (gameState == PAUSED) {
-        if (key == GLUT_KEY_UP)   selectedPauseMenu = (selectedPauseMenu - 1 + 2) % 2;
-        if (key == GLUT_KEY_DOWN) selectedPauseMenu = (selectedPauseMenu + 1) % 2;
+    if(gameState==HELP||gameState==HIGH_SCORE){
         glutPostRedisplay(); return;
     }
-    if (gameState == PLAYING) {
-        if (key == GLUT_KEY_LEFT)  keyLeft = true;
-        if (key == GLUT_KEY_RIGHT) keyRight = true;
+    if(gameState==PAUSED){
+        if(key==GLUT_KEY_UP)   selectedPauseMenu=(selectedPauseMenu+1)%2;
+        if(key==GLUT_KEY_DOWN) selectedPauseMenu=(selectedPauseMenu+1)%2;
+        glutPostRedisplay(); return;
+    }
+    if(gameState==PLAYING){
+        if(key==GLUT_KEY_LEFT)  keyLeft =true;
+        if(key==GLUT_KEY_RIGHT) keyRight=true;
     }
 }
 
-void specialKeysUp(int key, int x, int y) {
-    if (key == GLUT_KEY_LEFT)  keyLeft = false;
-    if (key == GLUT_KEY_RIGHT) keyRight = false;
+void specialKeysUp(int key,int,int){
+    if(key==GLUT_KEY_LEFT)  keyLeft =false;
+    if(key==GLUT_KEY_RIGHT) keyRight=false;
 }
 
-void mouseMotion(int x, int y) {
-    if (gameState != PLAYING) return;
-    paddle.x = (float)x - paddle.width / 2.0f;
-    if (paddle.x < 0) paddle.x = 0;
-    if (paddle.x + paddle.width > WINDOW_WIDTH) paddle.x = WINDOW_WIDTH - paddle.width;
-    glutPostRedisplay();
+void mouseMotion(int x,int){
+    // Only move paddle via mouse when playing AND ball is NOT on paddle
+    // (prevents the "paddle drift at launch" bug)
+    if(gameState!=PLAYING) return;
+    float nx=(float)x-paddle.width/2.0f;
+    if(nx<0) nx=0;
+    if(nx+paddle.width>WINDOW_WIDTH) nx=WINDOW_WIDTH-paddle.width;
+    paddle.x=nx;
 }
 
-void mouseClick(int button, int state, int x, int y) {
-    if (gameState == PLAYING && button == GLUT_LEFT_BUTTON && state == GLUT_DOWN) {
-        if (ballOnPaddle) {
-            ballOnPaddle = false;
-            ball.dy = fabs(ball.speed * 0.7f);
-            ball.dx = ball.speed * 0.7f;
-        } else if (shootActive) {
-            fireBullet();
-        }
+void mouseClick(int btn,int state,int x,int){
+    if(gameState==PLAYING&&btn==GLUT_LEFT_BUTTON&&state==GLUT_DOWN){
+        if(ballOnPaddle) launchBall();
+        else if(shootActive) fireBullet();
     }
 }
 
-int main(int argc, char** argv) {
-    srand((unsigned int)time(0));
-    glutInit(&argc, argv);
-    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB);
-    glutInitWindowSize(WINDOW_WIDTH, WINDOW_HEIGHT);
-    glutInitWindowPosition(100, 50);
+// ==================== MAIN ====================
+int main(int argc,char**argv){
+    srand((unsigned)time(0));
+    loadHighScores();
+
+    glutInit(&argc,argv);
+    glutInitDisplayMode(GLUT_DOUBLE|GLUT_RGB);
+    glutInitWindowSize(WINDOW_WIDTH,WINDOW_HEIGHT);
+    glutInitWindowPosition(100,50);
     glutCreateWindow("DX Ball Advanced - CSE 426");
-    glClearColor(0.0f, 0.0f, 0.1f, 1.0f);
+
+    glClearColor(0,0,.1f,1);
     glutDisplayFunc(display);
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
@@ -1154,7 +1189,7 @@ int main(int argc, char** argv) {
     glutPassiveMotionFunc(mouseMotion);
     glutMotionFunc(mouseMotion);
     glutMouseFunc(mouseClick);
-    glutTimerFunc(16, timer, 0);
+    glutTimerFunc(16,timerCB,0);
     glutMainLoop();
     return 0;
 }
