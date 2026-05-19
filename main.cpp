@@ -8,6 +8,7 @@
 #include <sstream>
 #include <algorithm>
 #include <fstream>
+#include <stdio.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -15,30 +16,29 @@
 #pragma comment(lib, "winmm.lib")
 #endif
 
-// ==================== CONSTANTS ====================
-const int WINDOW_WIDTH  = 800;
+const int WINDOW_WIDTH = 800;
 const int WINDOW_HEIGHT = 600;
-const int BRICK_ROWS    = 6;
-const int BRICK_COLS    = 10;
-const float BRICK_WIDTH   = 70.0f;
-const float BRICK_HEIGHT  = 25.0f;
+const int BRICK_ROWS = 6;
+const int BRICK_COLS = 10;
+const float BRICK_WIDTH = 70.0f;
+const float BRICK_HEIGHT = 25.0f;
 const float BRICK_PADDING = 5.0f;
 const float BRICK_START_X = 25.0f;
 const float BRICK_START_Y = 420.0f;
 const float PADDLE_WIDTH_DEFAULT = 100.0f;
 const float PADDLE_HEIGHT = 15.0f;
-const float PADDLE_Y      = 30.0f;
-const float PADDLE_SPEED  = 8.0f;
-const float BALL_RADIUS   = 10.0f;
-const float BALL_SPEED_INITIAL   = 4.0f;
+const float PADDLE_Y = 30.0f;
+const float PADDLE_SPEED = 8.0f;
+const float BALL_RADIUS = 10.0f;
+const float BALL_SPEED_INITIAL = 4.0f;
 const float BALL_SPEED_INCREMENT = 0.0003f;
-const float PERK_WIDTH  = 20.0f;
+const float PERK_WIDTH = 20.0f;
 const float PERK_HEIGHT = 20.0f;
-const float PERK_SPEED  = 2.5f;
-const float BULLET_WIDTH  = 5.0f;
+const float PERK_SPEED = 2.5f;
+const float BULLET_WIDTH = 5.0f;
 const float BULLET_HEIGHT = 12.0f;
-const float BULLET_SPEED  = 8.0f;
-const int MAX_LEVELS      = 3;
+const float BULLET_SPEED = 8.0f;
+const int MAX_LEVELS = 3;
 const int MAX_HIGH_SCORES = 5;
 
 enum GameState { MENU, PLAYING, PAUSED, GAME_OVER, WIN, HELP, HIGH_SCORE };
@@ -106,43 +106,77 @@ float gameTime=0.0f;
 bool  ballOnPaddle=true;
 bool  keyLeft=false, keyRight=false;
 int   selectedMenu=0, selectedPauseMenu=0;
+
 float paddleWidth=PADDLE_WIDTH_DEFAULT;
 bool  widerPaddleActive=false;   float widerPaddleTimer=0;
 bool  smallerPaddleActive=false; float smallerPaddleTimer=0;
-bool  shootActive=false;  float shootTimer=0, bulletCooldown=0;
-bool  fireballActive=false; float fireballTimer=0;
+bool  shootActive=false;         float shootTimer=0, bulletCooldown=0;
+bool  fireballActive=false;      float fireballTimer=0;
 float flashTimer=0, flashR=1, flashG=1, flashB=1;
 bool  gameStarted=false;
 
-const std::string HS_FILE = "dx_highscores.dat";
+const int HS_MAGIC   = 0x44584253;
+const int HS_VERSION = 1;
+
+std::string getHighScorePath() {
+#ifdef _WIN32
+    char path[MAX_PATH];
+    GetModuleFileNameA(NULL, path, MAX_PATH);
+    std::string fullPath(path);
+    size_t pos = fullPath.find_last_of("\\/");
+    if(pos != std::string::npos)
+        fullPath = fullPath.substr(0, pos+1);
+    fullPath += "dx_highscores.dat";
+    return fullPath;
+#else
+    return "dx_highscores.dat";
+#endif
+}
 
 void loadHighScores() {
     highScores.clear();
-    std::ifstream f(HS_FILE.c_str(), std::ios::binary);
+    FILE* f = fopen(getHighScorePath().c_str(), "rb");
     if(!f) return;
-    int n=0;
-    f.read(reinterpret_cast<char*>(&n), sizeof(n));
-    for(int i=0;i<n&&i<MAX_HIGH_SCORES;i++) {
-        HighScoreEntry e;
-        f.read(reinterpret_cast<char*>(&e.score), sizeof(e.score));
-        f.read(reinterpret_cast<char*>(&e.time),  sizeof(e.time));
-        f.read(reinterpret_cast<char*>(&e.level), sizeof(e.level));
+
+    int magic=0, version=0, n=0;
+    if(fread(&magic,   sizeof(int),1,f)!=1 || magic!=HS_MAGIC)
+        { fclose(f); remove(getHighScorePath().c_str()); return; }
+    if(fread(&version, sizeof(int),1,f)!=1 || version!=HS_VERSION)
+        { fclose(f); remove(getHighScorePath().c_str()); return; }
+    if(fread(&n, sizeof(int),1,f)!=1 || n<0 || n>MAX_HIGH_SCORES)
+        { fclose(f); return; }
+
+    for(int i=0;i<n;i++) {
+        HighScoreEntry e; e.score=0; e.level=1; e.time=0.0f;
+        if(fread(&e.score, sizeof(int),  1,f)!=1) break;
+        if(fread(&e.time,  sizeof(float),1,f)!=1) break;
+        if(fread(&e.level, sizeof(int),  1,f)!=1) break;
         highScores.push_back(e);
     }
-    f.close();
+    fclose(f);
 }
 
 void saveHighScores() {
-    std::ofstream f(HS_FILE.c_str(), std::ios::binary|std::ios::trunc);
+    std::string path = getHighScorePath();
+    FILE* f = fopen(path.c_str(), "wb");
     if(!f) return;
-    int n=(int)highScores.size();
-    f.write(reinterpret_cast<const char*>(&n), sizeof(n));
-    for(auto& e:highScores) {
-        f.write(reinterpret_cast<const char*>(&e.score), sizeof(e.score));
-        f.write(reinterpret_cast<const char*>(&e.time),  sizeof(e.time));
-        f.write(reinterpret_cast<const char*>(&e.level), sizeof(e.level));
+
+    int magic   = HS_MAGIC;
+    int version = HS_VERSION;
+    int n       = (int)highScores.size();
+    if(n > MAX_HIGH_SCORES) n = MAX_HIGH_SCORES;
+
+    fwrite(&magic,   sizeof(int),1,f);
+    fwrite(&version, sizeof(int),1,f);
+    fwrite(&n,       sizeof(int),1,f);
+
+    for(int i=0;i<n;i++) {
+        fwrite(&highScores[i].score, sizeof(int),  1,f);
+        fwrite(&highScores[i].time,  sizeof(float),1,f);
+        fwrite(&highScores[i].level, sizeof(int),  1,f);
     }
-    f.close();
+    fflush(f);
+    fclose(f);
 }
 
 void addHighScore(int sc, float tm, int lv) {
@@ -154,30 +188,37 @@ void addHighScore(int sc, float tm, int lv) {
     saveHighScores();
 }
 
-std::string iStr(int v)           { std::ostringstream o; o<<v; return o.str(); }
-std::string fStr(float v, int d=1){ std::ostringstream o; o.precision(d); o<<std::fixed<<v; return o.str(); }
+std::string iStr(int v)            { std::ostringstream o; o<<v; return o.str(); }
+std::string fStr(float v, int d=1) { std::ostringstream o; o.precision(d); o<<std::fixed<<v; return o.str(); }
 
-void drawText(float x,float y,const std::string& s,
-              float r=1,float g=1,float b=1,void* font=GLUT_BITMAP_HELVETICA_18) {
+void drawText(float x, float y, const std::string& s,
+              float r=1, float g=1, float b=1,
+              void* font=GLUT_BITMAP_HELVETICA_18) {
     glColor3f(r,g,b); glRasterPos2f(x,y);
     for(char c:s) glutBitmapCharacter(font,c);
 }
-void drawTextL(float x,float y,const std::string& s,float r=1,float g=1,float b=1) {
+
+void drawTextL(float x, float y, const std::string& s,
+               float r=1, float g=1, float b=1) {
     glColor3f(r,g,b); glRasterPos2f(x,y);
     for(char c:s) glutBitmapCharacter(GLUT_BITMAP_TIMES_ROMAN_24,c);
 }
-void drawRect(float x,float y,float w,float h,float r,float g,float b,bool fill=true) {
+
+void drawRect(float x, float y, float w, float h,
+              float r, float g, float b, bool fill=true) {
     glColor3f(r,g,b);
     glBegin(fill?GL_QUADS:GL_LINE_LOOP);
     glVertex2f(x,y); glVertex2f(x+w,y); glVertex2f(x+w,y+h); glVertex2f(x,y+h);
     glEnd();
 }
-void drawCircleGL(float cx,float cy,float rad,float r,float g,float b,bool fill=true) {
+
+void drawCircleGL(float cx, float cy, float rad,
+                  float r, float g, float b, bool fill=true) {
     glColor3f(r,g,b);
     glBegin(fill?GL_POLYGON:GL_LINE_LOOP);
     for(int i=0;i<32;i++) {
         float a=2*3.14159265f*i/32;
-        glVertex2f(cx+rad*cosf(a),cy+rad*sinf(a));
+        glVertex2f(cx+rad*cosf(a), cy+rad*sinf(a));
     }
     glEnd();
 }
@@ -192,39 +233,34 @@ void drawLine(int x1, int y1, int x2, int y2) {
     int dx, dy, i, e;
     int incx, incy, inc1, inc2;
     int x, y;
-
     dx = x2 - x1;
     dy = y2 - y1;
-
     if (dx < 0) dx = -dx;
     if (dy < 0) dy = -dy;
-
     incx = 1;
     if (x2 < x1) incx = -1;
     incy = 1;
     if (y2 < y1) incy = -1;
-
     x = x1; y = y1;
-
     if (dx > dy) {
         draw_pixel(x, y);
-        e    = 2 * dy - dx;
+        e = 2 * dy - dx;
         inc1 = 2 * (dy - dx);
         inc2 = 2 * dy;
         for (i = 0; i < dx; i++) {
             if (e >= 0) { y += incy; e += inc1; }
-            else          e += inc2;
+            else e += inc2;
             x += incx;
             draw_pixel(x, y);
         }
     } else {
         draw_pixel(x, y);
-        e    = 2 * dx - dy;
+        e = 2 * dx - dy;
         inc1 = 2 * (dx - dy);
         inc2 = 2 * dx;
         for (i = 0; i < dy; i++) {
             if (e >= 0) { x += incx; e += inc1; }
-            else          e += inc2;
+            else e += inc2;
             y += incy;
             draw_pixel(x, y);
         }
@@ -245,12 +281,12 @@ void drawBresenhamRectOutline(float fx, float fy, float fw, float fh,
                                float r, float g, float b) {
     glColor3f(r, g, b);
     glPointSize(1.0f);
-    int x1=(int)fx,     y1=(int)fy;
+    int x1=(int)fx,    y1=(int)fy;
     int x2=(int)(fx+fw), y2=(int)(fy+fh);
-    drawLine(x1, y1, x2, y1); 
-    drawLine(x2, y1, x2, y2); 
-    drawLine(x2, y2, x1, y2); 
-    drawLine(x1, y2, x1, y1); 
+    drawLine(x1, y1, x2, y1);
+    drawLine(x2, y1, x2, y2);
+    drawLine(x2, y2, x1, y2);
+    drawLine(x1, y2, x1, y1);
 }
 
 int cx_global, cy_global;
@@ -271,11 +307,9 @@ void plotCircle(int x, int y) {
 void drawMidpointCircle(int cx, int cy, int r) {
     cx_global = cx;
     cy_global = cy;
-
     int x = 0;
     int y = r;
     int d = 1 - r;
-
     glPointSize(1.0f);
     while (x <= y) {
         plotCircle(x, y);
@@ -292,18 +326,15 @@ void drawMidpointCircle(int cx, int cy, int r) {
 void drawMidpointCircleFilled(int cx, int cy, int r) {
     cx_global = cx;
     cy_global = cy;
-
     int x = 0;
     int y = r;
     int d = 1 - r;
-
     glPointSize(1.0f);
     while (x <= y) {
         drawLine(cx - y, cy + x, cx + y, cy + x);
         drawLine(cx - y, cy - x, cx + y, cy - x);
         drawLine(cx - x, cy + y, cx + x, cy + y);
         drawLine(cx - x, cy - y, cx + x, cy - y);
-
         if (d < 0)
             d += 2 * x + 3;
         else {
@@ -330,11 +361,11 @@ void getBrickColor(int row, float&r, float&g, float&b) {
     switch(row) {
         case 0: r=1;g=.2f;b=.2f; break;
         case 1: r=1;g=.5f;b=0;   break;
-        case 2: r=1;g=1;  b=0;   break;
+        case 2: r=1;g=1; b=0;    break;
         case 3: r=0;g=.8f;b=0;   break;
         case 4: r=0;g=.5f;b=1;   break;
         case 5: r=.6f;g=0;b=.8f; break;
-        default:r=g=b=1;
+        default: r=g=b=1;
     }
 }
 
@@ -364,9 +395,9 @@ void initBricks() {
 }
 
 void resetPaddle() {
-    paddle.width = paddleWidth;
-    paddle.x     = WINDOW_WIDTH/2.0f - paddle.width/2.0f;
-    paddle.y     = PADDLE_Y;
+    paddle.width=paddleWidth;
+    paddle.x=WINDOW_WIDTH/2.0f-paddle.width/2.0f;
+    paddle.y=PADDLE_Y;
 }
 
 void initBall() {
@@ -409,13 +440,13 @@ void spawnPerk(float x, float y, PerkType type) {
     if(type==PERK_NONE) return;
     Perk p; p.x=x; p.y=y; p.dy=-PERK_SPEED; p.type=type; p.active=true;
     switch(type) {
-        case PERK_EXTRA_LIFE:     p.r=0;p.g=1;p.b=0;   break;
-        case PERK_FASTER_BALL:    p.r=1;p.g=.3f;p.b=0; break;
-        case PERK_WIDER_PADDLE:   p.r=0;p.g=.5f;p.b=1; break;
-        case PERK_FIREBALL:       p.r=1;p.g=.4f;p.b=0; break;
-        case PERK_DEATH:          p.r=.8f;p.g=0;p.b=.8f; break;
-        case PERK_SMALLER_PADDLE: p.r=1;p.g=0;p.b=.5f; break;
-        case PERK_SHOOT:          p.r=1;p.g=1;p.b=0;   break;
+        case PERK_EXTRA_LIFE:     p.r=0;   p.g=1;   p.b=0;   break;
+        case PERK_FASTER_BALL:    p.r=1;   p.g=.3f; p.b=0;   break;
+        case PERK_WIDER_PADDLE:   p.r=0;   p.g=.5f; p.b=1;   break;
+        case PERK_FIREBALL:       p.r=1;   p.g=.4f; p.b=0;   break;
+        case PERK_DEATH:          p.r=.8f; p.g=0;   p.b=.8f; break;
+        case PERK_SMALLER_PADDLE: p.r=1;   p.g=0;   p.b=.5f; break;
+        case PERK_SHOOT:          p.r=1;   p.g=1;   p.b=0;   break;
         default: break;
     }
     perks.push_back(p);
@@ -425,23 +456,27 @@ void applyPerk(PerkType type) {
     switch(type) {
         case PERK_EXTRA_LIFE:
             lives++; playSound(SND_PERK); break;
+
         case PERK_FASTER_BALL: {
             ball.speed+=1.5f;
             float m=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
-            if(m>0){ball.dx=ball.dx/m*ball.speed;ball.dy=ball.dy/m*ball.speed;}
+            if(m>0){ball.dx=ball.dx/m*ball.speed; ball.dy=ball.dy/m*ball.speed;}
             playSound(SND_PERK); break;
         }
+
         case PERK_WIDER_PADDLE:
             widerPaddleActive=true; widerPaddleTimer=10;
             smallerPaddleActive=false;
             paddle.width=PADDLE_WIDTH_DEFAULT*1.7f; paddleWidth=paddle.width;
             playSound(SND_PERK); break;
+
         case PERK_FIREBALL:
             ball.isFireball=true; fireballActive=true;
             fireballTimer=8; ball.fireTimer=8;
             playSound(SND_FIREBALL); break;
+
         case PERK_DEATH:
-            flashTimer=.5f; flashR=1;flashG=0;flashB=0;
+            flashTimer=.5f; flashR=1; flashG=0; flashB=0;
             playSound(SND_DEATH);
             lives--;
             if(lives<=0) {
@@ -450,14 +485,17 @@ void applyPerk(PerkType type) {
                 gameStarted=false; gameState=GAME_OVER;
             } else initBall();
             break;
+
         case PERK_SMALLER_PADDLE:
             smallerPaddleActive=true; smallerPaddleTimer=8;
             widerPaddleActive=false;
             paddle.width=PADDLE_WIDTH_DEFAULT*0.5f; paddleWidth=paddle.width;
             playSound(SND_PERK); break;
+
         case PERK_SHOOT:
             shootActive=true; shootTimer=12; bulletCooldown=0;
             playSound(SND_PERK); break;
+
         default: break;
     }
 }
@@ -493,25 +531,25 @@ void updateGame(float dt) {
 
     if(fireballActive) {
         fireballTimer-=dt; ball.fireTimer-=dt;
-        if(fireballTimer<=0) { fireballActive=false; ball.isFireball=false; ball.fireTimer=0; }
+        if(fireballTimer<=0){ fireballActive=false; ball.isFireball=false; ball.fireTimer=0; }
     }
     if(widerPaddleActive) {
         widerPaddleTimer-=dt;
         if(widerPaddleTimer<=0) {
             widerPaddleActive=false;
-            if(!smallerPaddleActive) { paddle.width=PADDLE_WIDTH_DEFAULT; paddleWidth=PADDLE_WIDTH_DEFAULT; }
+            if(!smallerPaddleActive){ paddle.width=PADDLE_WIDTH_DEFAULT; paddleWidth=PADDLE_WIDTH_DEFAULT; }
         }
     }
     if(smallerPaddleActive) {
         smallerPaddleTimer-=dt;
         if(smallerPaddleTimer<=0) {
             smallerPaddleActive=false;
-            if(!widerPaddleActive) { paddle.width=PADDLE_WIDTH_DEFAULT; paddleWidth=PADDLE_WIDTH_DEFAULT; }
+            if(!widerPaddleActive){ paddle.width=PADDLE_WIDTH_DEFAULT; paddleWidth=PADDLE_WIDTH_DEFAULT; }
         }
     }
     if(shootActive) {
         shootTimer-=dt; bulletCooldown-=dt;
-        if(shootTimer<=0) { shootActive=false; bullets.clear(); }
+        if(shootTimer<=0){ shootActive=false; bullets.clear(); }
     }
 
     if(keyLeft)  { paddle.x-=PADDLE_SPEED; if(paddle.x<0) paddle.x=0; }
@@ -524,11 +562,10 @@ void updateGame(float dt) {
     }
 
     float mag=sqrtf(ball.dx*ball.dx+ball.dy*ball.dy);
-    if(mag>0) { ball.dx=ball.dx/mag*ball.speed; ball.dy=ball.dy/mag*ball.speed; }
-
+    if(mag>0){ ball.dx=ball.dx/mag*ball.speed; ball.dy=ball.dy/mag*ball.speed; }
     ball.x+=ball.dx; ball.y+=ball.dy;
 
-    if(ball.x-BALL_RADIUS<0)            { ball.x=BALL_RADIUS;             ball.dx= fabsf(ball.dx); }
+    if(ball.x-BALL_RADIUS<0)            { ball.x=BALL_RADIUS;              ball.dx= fabsf(ball.dx); }
     if(ball.x+BALL_RADIUS>WINDOW_WIDTH) { ball.x=WINDOW_WIDTH-BALL_RADIUS; ball.dx=-fabsf(ball.dx); }
     if(ball.y+BALL_RADIUS>WINDOW_HEIGHT){ ball.y=WINDOW_HEIGHT-BALL_RADIUS; ball.dy=-fabsf(ball.dy); }
 
@@ -595,7 +632,7 @@ void updateGame(float dt) {
     for(auto&blt:bullets) {
         if(!blt.active) continue;
         blt.y+=BULLET_SPEED;
-        if(blt.y>WINDOW_HEIGHT) { blt.active=false; continue; }
+        if(blt.y>WINDOW_HEIGHT){ blt.active=false; continue; }
         for(auto&bk:bricks) {
             if(!bk.active) continue;
             if(bulletBrickCollide(blt,bk)) {
@@ -612,7 +649,6 @@ void updateGame(float dt) {
 
 void drawPaddle() {
     float px=paddle.x, py=paddle.y, pw=paddle.width, ph=PADDLE_HEIGHT;
-
     float pr=0.3f, pg=0.6f, pb=1.0f;
     if(shootActive)         { pr=1.0f; pg=1.0f; pb=0.0f; }
     if(smallerPaddleActive) { pr=1.0f; pg=0.2f; pb=0.5f; }
@@ -620,48 +656,32 @@ void drawPaddle() {
 
     glPointSize(1.0f);
     drawBresenhamRect(px, py, pw, ph, pr, pg, pb);
-
     float hr=std::min(pr+0.4f,1.0f), hg=std::min(pg+0.3f,1.0f);
     drawBresenhamRect(px+2, py+ph-4, pw-4, 3, hr, hg, 1.0f);
     drawBresenhamRectOutline(px, py, pw, ph, 1.0f, 1.0f, 1.0f);
 
     if(shootActive) {
-        drawBresenhamRect(px+2,      py+ph, 8, 6, 1.0f, 0.8f, 0.0f);
-        drawBresenhamRect(px+pw-10,  py+ph, 8, 6, 1.0f, 0.8f, 0.0f);
+        drawBresenhamRect(px+2,     py+ph, 8, 6, 1.0f, 0.8f, 0.0f);
+        drawBresenhamRect(px+pw-10, py+ph, 8, 6, 1.0f, 0.8f, 0.0f);
     }
 }
 
 void drawBall() {
     if(!ball.active) return;
-
-    int bx=(int)ball.x;
-    int by=(int)ball.y;
-    int br=(int)BALL_RADIUS;
-
+    int bx=(int)ball.x, by=(int)ball.y, br=(int)BALL_RADIUS;
     glPointSize(1.0f);
-
     if(ball.isFireball) {
-        glColor3f(1.0f, 0.3f, 0.0f);
-        drawMidpointCircleFilled(bx, by, br+5);
-        glColor3f(1.0f, 0.6f, 0.0f);
-        drawMidpointCircleFilled(bx, by, br+3);
-        glColor3f(1.0f, 1.0f, 0.3f);
-        drawMidpointCircleFilled(bx, by, br);
-        glColor3f(1.0f, 0.5f, 0.0f);
-        drawMidpointCircle(bx, by, br+5);
-
+        glColor3f(1.0f,0.3f,0.0f); drawMidpointCircleFilled(bx,by,br+5);
+        glColor3f(1.0f,0.6f,0.0f); drawMidpointCircleFilled(bx,by,br+3);
+        glColor3f(1.0f,1.0f,0.3f); drawMidpointCircleFilled(bx,by,br);
+        glColor3f(1.0f,0.5f,0.0f); drawMidpointCircle(bx,by,br+5);
     } else {
-        glColor3f(0.0f, 0.0f, 0.0f);
-        drawMidpointCircleFilled(bx+2, by-2, br);
-        glColor3f(1.0f, 1.0f, 1.0f);
-        drawMidpointCircleFilled(bx, by, br);
-        glColor3f(0.85f, 0.85f, 1.0f);
-        drawMidpointCircleFilled(bx-3, by+3, (int)(BALL_RADIUS*0.35f));
-        glColor3f(0.6f, 0.6f, 0.8f);
-        drawMidpointCircle(bx, by, br);
+        glColor3f(0.0f,0.0f,0.0f); drawMidpointCircleFilled(bx+2,by-2,br);
+        glColor3f(1.0f,1.0f,1.0f); drawMidpointCircleFilled(bx,by,br);
+        glColor3f(0.85f,0.85f,1.0f); drawMidpointCircleFilled(bx-3,by+3,(int)(BALL_RADIUS*0.35f));
+        glColor3f(0.6f,0.6f,0.8f); drawMidpointCircle(bx,by,br);
     }
 }
-
 
 void drawBackground() {
     glBegin(GL_QUADS);
@@ -708,10 +728,14 @@ void drawPerks() {
         drawRect(p.x-PERK_WIDTH/2,p.y-PERK_HEIGHT/2,PERK_WIDTH,PERK_HEIGHT,1,1,1,false);
         std::string lbl="?";
         switch(p.type){
-            case PERK_EXTRA_LIFE:lbl="L";break; case PERK_FASTER_BALL:lbl="F";break;
-            case PERK_WIDER_PADDLE:lbl="W";break; case PERK_FIREBALL:lbl="B";break;
-            case PERK_DEATH:lbl="X";break; case PERK_SMALLER_PADDLE:lbl="S";break;
-            case PERK_SHOOT:lbl="G";break; default:break;
+            case PERK_EXTRA_LIFE:     lbl="L"; break;
+            case PERK_FASTER_BALL:    lbl="F"; break;
+            case PERK_WIDER_PADDLE:   lbl="W"; break;
+            case PERK_FIREBALL:       lbl="B"; break;
+            case PERK_DEATH:          lbl="X"; break;
+            case PERK_SMALLER_PADDLE: lbl="S"; break;
+            case PERK_SHOOT:          lbl="G"; break;
+            default: break;
         }
         drawText(p.x-4,p.y-6,lbl,1,1,1,GLUT_BITMAP_HELVETICA_12);
     }
@@ -739,10 +763,14 @@ void drawHUD() {
     drawText(740,WINDOW_HEIGHT-25,st,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
 
     int hy=10;
-    if(widerPaddleActive)   drawText(10, hy,"WIDE:"+fStr(widerPaddleTimer,1)+"s",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
-    if(smallerPaddleActive) drawText(110,hy,"SMALL:"+fStr(smallerPaddleTimer,1)+"s",1,0,.5f,GLUT_BITMAP_HELVETICA_12);
-    if(shootActive)         drawText(220,hy,"GUN:"+fStr(shootTimer,1)+"s",1,1,0,GLUT_BITMAP_HELVETICA_12);
-    if(fireballActive)      drawText(330,hy,"FIRE:"+fStr(fireballTimer,1)+"s",1,.5f,0,GLUT_BITMAP_HELVETICA_12);
+    if(widerPaddleActive)
+        drawText(10,hy,"WIDE:"+fStr(widerPaddleTimer,1)+"s",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    if(smallerPaddleActive)
+        drawText(110,hy,"SMALL:"+fStr(smallerPaddleTimer,1)+"s",1,0,.5f,GLUT_BITMAP_HELVETICA_12);
+    if(shootActive)
+        drawText(220,hy,"GUN:"+fStr(shootTimer,1)+"s",1,1,0,GLUT_BITMAP_HELVETICA_12);
+    if(fireballActive)
+        drawText(330,hy,"FIRE:"+fStr(fireballTimer,1)+"s",1,.5f,0,GLUT_BITMAP_HELVETICA_12);
     drawText(450,hy,"[L]Life [F]Fast [W]Wide [B]Fire [X]Death [S]Small [G]Gun",
              .5f,.5f,.5f,GLUT_BITMAP_HELVETICA_12);
 }
@@ -751,15 +779,14 @@ void drawPauseOverlay() {
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glColor4f(0,0,0,.65f);
     glBegin(GL_QUADS);
-    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
-    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT); glVertex2f(0,WINDOW_HEIGHT);
     glEnd(); glDisable(GL_BLEND);
 
     drawRect(250,180,300,255,0,0,.25f);
     drawRect(250,180,300,255,0,.8f,1,false);
     drawTextL(328,403,"PAUSED",1,1,0);
-
-    std::string sm=soundEnabled?"Sound: ON  (M)":"Sound: OFF (M)";
+    std::string sm=soundEnabled?"Sound: ON (M)":"Sound: OFF (M)";
     drawText(285,375,sm,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
 
     const char* opts[]={"RESUME","MAIN MENU"};
@@ -775,7 +802,7 @@ void drawPauseOverlay() {
             drawTextL(318,by+8,opts[i],.7f,.7f,.9f);
         }
     }
-    drawText(262,192,"UP/DOWN: select   ENTER: confirm",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
+    drawText(262,192,"UP/DOWN: select  ENTER: confirm",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
 void drawMenu() {
@@ -796,6 +823,7 @@ void drawMenu() {
     std::vector<std::string> items;
     if(gameStarted) items={"RESUME GAME","NEW GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
     else            items={"START GAME","HIGH SCORES","HOW TO PLAY","EXIT"};
+
     int n=(int)items.size();
     if(selectedMenu>=n) selectedMenu=n-1;
 
@@ -813,9 +841,9 @@ void drawMenu() {
             drawTextL(bx+28,by+11,items[i],.7f,.7f,.9f);
         }
     }
-    std::string st=soundEnabled?"Sound: ON  (M to toggle)":"Sound: OFF (M to toggle)";
+    std::string st=soundEnabled?"Sound: ON (M to toggle)":"Sound: OFF (M to toggle)";
     drawText(270,70,st,soundEnabled?0:1,soundEnabled?1:0,0,GLUT_BITMAP_HELVETICA_12);
-    drawText(215,48,"UP/DOWN: navigate     ENTER: select",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
+    drawText(215,48,"UP/DOWN: navigate  ENTER: select",.5f,.5f,.7f,GLUT_BITMAP_HELVETICA_12);
 }
 
 void drawHighScoreScreen() {
@@ -826,9 +854,9 @@ void drawHighScoreScreen() {
 
     drawRect(150,492,500,30,0,.1f,.3f);
     drawRect(150,492,500,30,0,.5f,.8f,false);
-    drawText(178,503,"RANK",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    drawText(178,503,"RANK", 0,.8f,1,GLUT_BITMAP_HELVETICA_12);
     drawText(270,503,"SCORE",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
-    drawText(390,503,"TIME",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
+    drawText(390,503,"TIME", 0,.8f,1,GLUT_BITMAP_HELVETICA_12);
     drawText(505,503,"LEVEL",0,.8f,1,GLUT_BITMAP_HELVETICA_12);
 
     if(highScores.empty()) {
@@ -895,20 +923,20 @@ void drawGameOver() {
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glColor4f(0,0,0,.75f);
     glBegin(GL_QUADS);
-    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
-    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT); glVertex2f(0,WINDOW_HEIGHT);
     glEnd(); glDisable(GL_BLEND);
 
     drawRect(165,182,470,245,.12f,0,0);
     drawRect(165,182,470,245,1,0,0,false);
-    drawTextL(260,390,"GAME  OVER",1,.2f,.2f);
-    drawText(235,355,"Final Score:   "+iStr(score),1,1,.5f);
+    drawTextL(260,390,"GAME OVER",1,.2f,.2f);
+    drawText(235,355,"Final Score: "+iStr(score),1,1,.5f);
     drawText(235,327,"Level Reached: "+iStr(currentLevel),.8f,.8f,1);
-    drawText(235,299,"Time Played:   "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
+    drawText(235,299,"Time Played: "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
     if(!highScores.empty()&&highScores[0].score==score)
         drawText(268,270,"*** NEW HIGH SCORE! ***",1,.84f,0);
     drawText(230,240,"Press ENTER to Play Again",.9f,.9f,.9f);
-    drawText(245,214,"Press ESC  for Main Menu",.7f,.7f,.7f);
+    drawText(245,214,"Press ESC for Main Menu",.7f,.7f,.7f);
 }
 
 void drawWin() {
@@ -916,8 +944,8 @@ void drawWin() {
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);
     glColor4f(0,.05f,0,.5f);
     glBegin(GL_QUADS);
-    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
-    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT); glVertex2f(0,WINDOW_HEIGHT);
     glEnd(); glDisable(GL_BLEND);
 
     drawRect(155,172,490,280,0,.1f,.05f);
@@ -930,11 +958,11 @@ void drawWin() {
         drawText(225,378,"Get ready for Level "+iStr(currentLevel)+"!",.9f,1,.9f);
     }
     drawText(235,343,"Score: "+iStr(score),1,1,.5f);
-    drawText(235,313,"Time:  "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
+    drawText(235,313,"Time: "+fStr(gameTime)+" seconds",.8f,.8f,.8f);
     drawText(235,283,"Level: "+iStr(std::min(currentLevel-1,MAX_LEVELS))+"/"+iStr(MAX_LEVELS),.8f,.8f,1);
     if(currentLevel<=MAX_LEVELS) drawText(218,250,"Press ENTER for Next Level",0,1,.5f);
     else                         drawText(218,250,"Press ENTER to Play Again",0,1,.5f);
-    drawText(238,220,"Press ESC  for Main Menu",.7f,.7f,.7f);
+    drawText(238,220,"Press ESC for Main Menu",.7f,.7f,.7f);
 }
 
 void drawFlash() {
@@ -943,8 +971,8 @@ void drawFlash() {
     float a=flashTimer*1.5f; if(a>.6f) a=.6f;
     glColor4f(flashR,flashG,flashB,a);
     glBegin(GL_QUADS);
-    glVertex2f(0,0);glVertex2f(WINDOW_WIDTH,0);
-    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT);glVertex2f(0,WINDOW_HEIGHT);
+    glVertex2f(0,0); glVertex2f(WINDOW_WIDTH,0);
+    glVertex2f(WINDOW_WIDTH,WINDOW_HEIGHT); glVertex2f(0,WINDOW_HEIGHT);
     glEnd(); glDisable(GL_BLEND);
 }
 
@@ -974,7 +1002,7 @@ void display() {
     glutSwapBuffers();
 }
 
-void reshape(int w,int h) {
+void reshape(int w, int h) {
     glViewport(0,0,w,h);
     glMatrixMode(GL_PROJECTION); glLoadIdentity();
     gluOrtho2D(0,WINDOW_WIDTH,0,WINDOW_HEIGHT);
@@ -989,8 +1017,8 @@ void timerCB(int) {
 
 void fireBullet() {
     if(!shootActive||bulletCooldown>0) return;
-    Bullet b1; b1.x=paddle.x+5;               b1.y=paddle.y+PADDLE_HEIGHT+1; b1.active=true;
-    Bullet b2; b2.x=paddle.x+paddle.width-5;  b2.y=b1.y;                      b2.active=true;
+    Bullet b1; b1.x=paddle.x+5;              b1.y=paddle.y+PADDLE_HEIGHT+1; b1.active=true;
+    Bullet b2; b2.x=paddle.x+paddle.width-5;  b2.y=b1.y;                    b2.active=true;
     bullets.push_back(b1); bullets.push_back(b2);
     bulletCooldown=0.35f;
     playSound(SND_BULLET);
@@ -998,8 +1026,8 @@ void fireBullet() {
 
 void launchBall() {
     ballOnPaddle=false;
-    ball.dy= fabsf(ball.speed*0.7f);
-    ball.dx= ball.speed*0.7f;
+    ball.dy=fabsf(ball.speed*0.7f);
+    ball.dx=ball.speed*0.7f;
     playSound(SND_LAUNCH);
 }
 
@@ -1020,7 +1048,7 @@ void menuAction(int idx) {
     }
 }
 
-void keyboard(unsigned char key,int,int) {
+void keyboard(unsigned char key, int, int) {
     if(key=='m'||key=='M') {
         soundEnabled=!soundEnabled;
         if(soundEnabled) playSound(SND_PERK);
@@ -1035,13 +1063,13 @@ void keyboard(unsigned char key,int,int) {
             if(key==13) menuAction(selectedMenu);
             break;
         case PLAYING:
-            if(key==' ') { if(ballOnPaddle) launchBall(); else if(shootActive) fireBullet(); }
-            if(key=='p'||key=='P') { gameState=PAUSED; selectedPauseMenu=0; }
-            if(key==27)            { gameState=PAUSED; selectedPauseMenu=0; }
+            if(key==' '){ if(ballOnPaddle) launchBall(); else if(shootActive) fireBullet(); }
+            if(key=='p'||key=='P'){ gameState=PAUSED; selectedPauseMenu=0; }
+            if(key==27)           { gameState=PAUSED; selectedPauseMenu=0; }
             break;
         case PAUSED:
             if(key=='p'||key=='P') gameState=PLAYING;
-            if(key==13) { if(selectedPauseMenu==0) gameState=PLAYING; else{ gameState=MENU; selectedMenu=0; } }
+            if(key==13){ if(selectedPauseMenu==0) gameState=PLAYING; else{ gameState=MENU; selectedMenu=0; } }
             if(key==27) gameState=PLAYING;
             break;
         case GAME_OVER:
@@ -1057,7 +1085,7 @@ void keyboard(unsigned char key,int,int) {
     glutPostRedisplay();
 }
 
-void specialKeys(int key,int,int) {
+void specialKeys(int key, int, int) {
     if(gameState==MENU) {
         int n=menuItemCount();
         if(key==GLUT_KEY_UP)   selectedMenu=(selectedMenu-1+n)%n;
@@ -1076,12 +1104,12 @@ void specialKeys(int key,int,int) {
     }
 }
 
-void specialKeysUp(int key,int,int) {
+void specialKeysUp(int key, int, int) {
     if(key==GLUT_KEY_LEFT)  keyLeft =false;
     if(key==GLUT_KEY_RIGHT) keyRight=false;
 }
 
-void mouseMotion(int x,int) {
+void mouseMotion(int x, int) {
     if(gameState!=PLAYING) return;
     float nx=(float)x-paddle.width/2.0f;
     if(nx<0) nx=0;
@@ -1089,14 +1117,14 @@ void mouseMotion(int x,int) {
     paddle.x=nx;
 }
 
-void mouseClick(int btn,int state,int x,int) {
+void mouseClick(int btn, int state, int x, int) {
     if(gameState==PLAYING&&btn==GLUT_LEFT_BUTTON&&state==GLUT_DOWN) {
         if(ballOnPaddle) launchBall();
         else if(shootActive) fireBullet();
     }
 }
 
-int main(int argc,char**argv) {
+int main(int argc, char** argv) {
     srand((unsigned)time(0));
     loadHighScores();
     glutInit(&argc,argv);
